@@ -56,7 +56,7 @@ gc repo clone owner/name [dest]                       # 克隆（内部调用 gi
 gc repo clone owner/name --api [--path src] [--ref main] [dest]   # 不用 git，直接走网页端 v2 接口下载整个文件树（--path 只下某子目录）
 gc repo create my-new-repo --description "..." --private   # 在当前用户名下建仓库
 gc repo fork owner/name [--name new-name] [--description "..."] [--link-remote] [--private]   # Fork 到当前用户命名空间（网页端 v2 接口）
-gc repo sync owner/name                                         # 同步 fork 仓库与其上游（网页端 v2 接口）
+gc repo sync owner/name [--branch main] [--no-wait]             # 同步 fork 仓库与其上游（--no-wait 只提交不轮询）
 gc repo set owner/name <private|public>                         # 设置仓库可见性（v5 开放 API）
 gc repo star owner/name                                         # 给仓库点 Star（网页端 v2 接口）
 gc repo unstar owner/name                                       # 取消 Star（网页端 v2 接口）

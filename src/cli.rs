@@ -142,7 +142,15 @@ enum RepoAction {
         private: bool,
     },
     /// 同步 fork 仓库与其上游（网页端 v2 接口）
-    Sync { repo: String },
+    Sync {
+        repo: String,
+        /// 指定要同步的分支（默认同步默认分支）
+        #[arg(long = "branch", default_value = "")]
+        branch: String,
+        /// 只提交同步任务，不轮询等待完成
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// 设置仓库可见性：gc repo set owner/name <private|public>（v5 开放 API）
     Set {
         repo: String,
@@ -452,15 +460,18 @@ pub fn run() -> Result<()> {
                     println!("已将可见性设为：{}", vis);
                 }
             }
-            RepoAction::Sync { repo } => {
+            RepoAction::Sync { repo, branch, no_wait } => {
                 let (o, n) = split_repo(&repo)?;
                 let token = web_access_token()?;
-                let (_started, msg) = crate::api::sync_repo(&token, &o, &n)?;
+                let (_started, msg) = crate::api::sync_repo(&token, &o, &n, &branch)?;
                 println!("已提交同步任务：{}", msg);
+                if no_wait {
+                    return Ok(());
+                }
                 let mut done = false;
                 for _ in 0..60 {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    let (ok, m) = crate::api::sync_repo_status(&token, &o, &n)?;
+                    let (ok, m) = crate::api::sync_repo_status(&token, &o, &n, &branch)?;
                     if ok {
                         println!("同步完成：{}", m);
                         done = true;

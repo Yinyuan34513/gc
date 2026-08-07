@@ -885,9 +885,9 @@ pub fn unstar_repo(token: &str, project_id: u64) -> Result<u64> {
 }
 
 /// 同步 fork 仓库与其上游（网页端 v2 接口：PUT /api/v2/projects/{owner%2Fname}/sync_repo）
-/// body: {"branch":""} 表示同步默认分支。返回 (repo_sync_result, repo_sync_message)。
+/// body: {"branch": <分支>} —— 空字符串表示同步默认分支。返回 (repo_sync_result, repo_sync_message)。
 /// 该接口仅「提交同步任务」，需再轮询 sync_repo_status 直到 success。
-pub fn sync_repo(token: &str, owner: &str, name: &str) -> Result<(bool, String)> {
+pub fn sync_repo(token: &str, owner: &str, name: &str, branch: &str) -> Result<(bool, String)> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -897,7 +897,7 @@ pub fn sync_repo(token: &str, owner: &str, name: &str) -> Result<(bool, String)>
         .context("创建 HTTP 客户端失败")?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
-    let body = serde_json::json!({ "branch": "" });
+    let body = serde_json::json!({ "branch": branch });
     let url = format!(
         "{}/api/v2/projects/{}/sync_repo",
         web_base().trim_end_matches('/'),
@@ -927,7 +927,8 @@ pub fn sync_repo(token: &str, owner: &str, name: &str) -> Result<(bool, String)>
 
 /// 查询 fork 同步任务状态（网页端 v2 接口：GET /api/v2/projects/{owner%2Fname}/sync_repo?branch）
 /// 返回 (repo_sync_result, repo_sync_message)；result=true 且 message="success" 表示完成。
-pub fn sync_repo_status(token: &str, owner: &str, name: &str) -> Result<(bool, String)> {
+/// branch 与提交时一致：空字符串用 `?branch`，否则 `?branch=<分支>`（做百分号编码）。
+pub fn sync_repo_status(token: &str, owner: &str, name: &str, branch: &str) -> Result<(bool, String)> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -937,10 +938,16 @@ pub fn sync_repo_status(token: &str, owner: &str, name: &str) -> Result<(bool, S
         .context("创建 HTTP 客户端失败")?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
+    let q = if branch.is_empty() {
+        "branch".to_string()
+    } else {
+        format!("branch={}", enc(branch))
+    };
     let url = format!(
-        "{}/api/v2/projects/{}/sync_repo?branch",
+        "{}/api/v2/projects/{}/sync_repo?{}",
         web_base().trim_end_matches('/'),
         path_seg,
+        q,
     );
     let resp = client
         .get(&url)
