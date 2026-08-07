@@ -48,6 +48,8 @@ enum Command {
     WebToken(WebTokenCmd),
     /// 用户操作（网页端 v1 接口）
     User(UserCmd),
+    /// Wiki 操作（网页端 v2 接口）
+    Wiki(WikiCmd),
 }
 
 #[derive(Parser)]
@@ -331,6 +333,30 @@ enum UserAction {
         /// 下载头像到该路径（不指定则只打印头像 URL）
         #[arg(long)]
         output: Option<String>,
+    },
+}
+
+#[derive(Parser)]
+struct WikiCmd {
+    #[command(subcommand)]
+    action: WikiAction,
+}
+#[derive(Subcommand)]
+enum WikiAction {
+    /// 创建 wiki 页面（网页端 v2 接口）
+    Create {
+        repo: String,
+        /// 页面标题（同时用作文件名 <title>.md）
+        title: String,
+        /// 页面内容（Markdown）；也可用 --file 从文件读取
+        #[arg(long, default_value = "")]
+        content: String,
+        /// 从文件读取内容（与 --content 同时给时以 --file 为准）
+        #[arg(long)]
+        file: Option<String>,
+        /// 提交说明
+        #[arg(long, default_value = "创建 wiki 页面")]
+        message: String,
     },
 }
 
@@ -766,6 +792,24 @@ pub fn run() -> Result<()> {
                 } else {
                     println!("{}", p.avatar);
                 }
+            }
+        },
+        Command::Wiki(c) => match c.action {
+            WikiAction::Create {
+                repo,
+                title,
+                content,
+                file,
+                message,
+            } => {
+                let token = web_access_token()?;
+                let body = match &file {
+                    Some(f) => std::fs::read_to_string(f)
+                        .map_err(|e| anyhow!("读取文件 {} 失败: {}", f, e))?,
+                    None => content.clone(),
+                };
+                let name = crate::api::wiki_create(&token, &repo, &title, &body, &message)?;
+                println!("已创建 wiki 页面：{}", name);
             }
         },
     }

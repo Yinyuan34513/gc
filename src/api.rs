@@ -976,6 +976,54 @@ pub fn sync_repo_status(token: &str, owner: &str, name: &str, branch: &str) -> R
     ))
 }
 
+/// 创建 wiki 页面（网页端 v2 接口：POST /api/v2/projects/wiki/create）
+/// body 字段（逆向自网页请求）：repo_path(owner/name)、name、file_path（均用页面标题）、
+/// commit_message、content、currUserId(留空)。响应体就是新建的文件名（如 "Home.md"）。
+/// 需要浏览器会话 JWT（Bearer）+ 浏览器头。
+pub fn wiki_create(
+    token: &str,
+    repo_path: &str,
+    title: &str,
+    content: &str,
+    message: &str,
+) -> Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let body = serde_json::json!({
+        "repo_path": repo_path,
+        "name": title,
+        "file_path": title,
+        "commit_message": message,
+        "content": content,
+        "currUserId": "",
+    });
+    let url = format!(
+        "{}/api/v2/projects/wiki/create",
+        web_base().trim_end_matches('/'),
+    );
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .context("请求 GitCode wiki 创建接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode wiki 创建接口错误 {}: {}", status, text));
+    }
+    Ok(text.trim().to_string())
+}
+
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
 /// 必须在 Cookie 里同时携带旧的 access 与 refresh，否则服务端会注销会话。
 /// 返回新的 (access, refresh)。token 会同时出现在 JSON body 与 Set-Cookie 中。

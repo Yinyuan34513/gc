@@ -106,6 +106,13 @@ gc user view <username>                    # 查看用户资料（网页端 v1 �
 gc user avatar <username> [--output path]  # 获取 / 下载用户头像（不指定 --output 则只打印 URL）
 ```
 
+### Wiki `gc wiki`（网页端 v2 接口）
+
+```bash
+gc wiki create owner/name <标题> --content "Markdown 内容" [--message "提交说明"]
+gc wiki create owner/name <标题> --file ./page.md        # 内容从文件读取
+```
+
 ### 讨论 `gc discussion`（网页端 v1 接口）
 
 讨论接口需要网页端 JWT（`gc web-token set`），且每次操作前会自动尝试刷新 token。
