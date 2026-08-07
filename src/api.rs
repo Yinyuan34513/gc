@@ -115,6 +115,12 @@ impl ApiClient {
         self.patch(&format!("/repos/{}/{}", owner, name), &body)
     }
 
+    /// 删除仓库（v5 开放 API：DELETE /repos/{owner}/{name}）。危险操作，调用方需先确认。
+    /// 成功时响应体为空（返回 Value::Null）。
+    pub fn delete_repo(&self, owner: &str, name: &str) -> Result<Value> {
+        self.request(reqwest::Method::DELETE, &format!("/repos/{}/{}", owner, name), &[], None)
+    }
+
     // ---- Issue ----
     pub fn issues(&self, owner: &str, name: &str, state: &str) -> Result<Value> {
         self.get(

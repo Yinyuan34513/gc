@@ -63,10 +63,13 @@ gc repo unstar owner/name                                       # 取消 Star（
 gc repo tree owner/name [--ref main]   # 列出文件树（网页端 v2 接口）
 gc repo read owner/name <file> [--ref main] [--output path]   # 读取文件内容（网页端 v2 接口）
 gc repo download owner/name <file1> <file2> ... [--ref main] [--output dir]   # 多线程流式下载多个文件
+gc repo delete owner/name --yes                                # 删除仓库（危险操作，必须加 --yes 确认）
 ```
 
 > `gc repo tree` 走的是网页端 v2 文件列表接口（`/api/v2/projects/{owner%2Fname}/repository/file-list`），
 > 需要网页端 JWT（`gc web-token set`），且 `ref_name` 必填。它返回扁平路径列表，`gc` 在本地组装成 ASCII 树。
+
+> ⚠ **`gc repo delete` 是危险操作**：不加 `--yes` 只会打印「即将删除」并拒绝执行；加 `--yes` 才会真正删除且**不可恢复**。请务必确认仓库名无误。
 
 ### Issue / PR `gc issue` / `gc pr`
 
@@ -95,6 +98,11 @@ gc release upload owner/name v1.0.0 ./dist/app.tar.gz   # 上传附件（带进�
 gc search repos "关键词"
 gc search users "用户名"
 gc search issues "关键词"
+```
+
+### 用户 `gc user`（网页端 v1 接口）
+
+```bash
 gc user view <username>                    # 查看用户资料（网页端 v1 接口）
 gc user avatar <username> [--output path]  # 获取 / 下载用户头像（不指定 --output 则只打印 URL）
 ```

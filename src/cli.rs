@@ -157,6 +157,13 @@ enum RepoAction {
         /// private 或 public
         visibility: String,
     },
+    /// 删除仓库（危险操作，需 --yes 确认）
+    Delete {
+        repo: String,
+        /// 确认删除（不加此 flag 只会预览要删除的仓库并拒绝执行）
+        #[arg(long)]
+        yes: bool,
+    },
     /// 给仓库点 Star（网页端 v2 接口）
     Star { repo: String },
     /// 取消仓库 Star（网页端 v2 接口）
@@ -493,6 +500,15 @@ pub fn run() -> Result<()> {
                 let v = api.set_repo_visibility(&o, &n, private)?;
                 let got = v["visibility"].as_str().unwrap_or("?");
                 println!("已将 {} 的可见性设为：{}", repo, got);
+            }
+            RepoAction::Delete { repo, yes } => {
+                let (o, n) = split_repo(&repo)?;
+                if !yes {
+                    eprintln!("⚠ 即将删除仓库 {}（不可恢复）", repo);
+                    anyhow::bail!("确认删除请加 --yes（gc repo delete {} --yes）", repo);
+                }
+                api.delete_repo(&o, &n)?;
+                println!("已删除仓库：{}", repo);
             }
             RepoAction::Star { repo } => {
                 let (o, n) = split_repo(&repo)?;
