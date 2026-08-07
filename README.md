@@ -75,7 +75,10 @@ gc repo delete owner/name --yes                                # 删除仓库（
 ```bash
 gc issue list owner/name --state open
 gc issue view owner/name 12
+# 通过网页端 v2 接口创建（description 字段，返回 #iid 与 web_url）
 gc issue create owner/name --title "bug" --body "..."
+# 带附件 / 标签 / 私有
+gc issue create owner/name --title "bug" --body "..." --attach ./log.txt --label bug --confidential
 
 gc pr list owner/name
 gc pr view owner/name 3

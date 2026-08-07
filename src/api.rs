@@ -133,11 +133,6 @@ impl ApiClient {
         self.get(&format!("/repos/{}/{}/issues/{}", owner, name, num), &[])
     }
 
-    pub fn create_issue(&self, owner: &str, name: &str, title: &str, body: &str) -> Result<Value> {
-        let b = serde_json::json!({ "title": title, "body": body });
-        self.post(&format!("/repos/{}/{}/issues", owner, name), &b)
-    }
-
     // ---- Pull Request ----
     pub fn pulls(&self, owner: &str, name: &str, state: &str) -> Result<Value> {
         self.get(
@@ -1022,6 +1017,131 @@ pub fn wiki_create(
         return Err(anyhow!("GitCode wiki 创建接口错误 {}: {}", status, text));
     }
     Ok(text.trim().to_string())
+}
+
+/// 通过网页端 v2 接口创建 Issue：POST /issuepr/api/v1/issue/{owner%2Fname}/issues
+/// 需要浏览器会话 JWT（Bearer）+ 浏览器头。body 字段逆向自网页请求：
+/// title、description（网页端用 description 而非 body）、confidential、
+/// project_id（owner%2Fname 单次编码）、labels、assignee_ids 等。
+/// 返回新建 Issue 的完整 JSON（含 iid / web_url）。
+pub fn issue_create(
+    token: &str,
+    owner: &str,
+    name: &str,
+    title: &str,
+    description: &str,
+    confidential: bool,
+    labels: &[String],
+) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body = serde_json::json!({
+        "title": title,
+        "description": description,
+        "confidential": confidential,
+        "assignee_ids": [],
+        "project_id": path_seg,
+        "labels": labels,
+        "enterprise_labels": [],
+        "milestone_id": "",
+        "priority": "",
+        "kanban_ids": [],
+        "issue_category": "-",
+        "issue_stage": "-",
+        "issue_severity": "-",
+        "field_list": [],
+    });
+    let url = format!(
+        "{}/issuepr/api/v1/issue/{}/issues",
+        web_base().trim_end_matches('/'),
+        path_seg,
+    );
+    let page_ref = format!("https://gitcode.com/{}/issues", repo_path);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .header("page-title", "%E6%96%B0%E5%BB%BA%20issue")
+        .json(&body)
+        .send()
+        .context("请求 GitCode 创建 Issue 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 创建 Issue 接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析创建 Issue 响应失败")
+}
+
+/// 上传 Issue 附件：POST /api/v2/projects/{owner%252Fname}/user_attachment/upload
+/// 注意路径里的 owner 是「二次编码」(%252F)。以 multipart 携带文件字节（网页端上传附件的
+/// 实际传输方式；粘贴的抓包里 Content-Length 应是被截断的）。响应返回上传后的文件元信息。
+/// 需要浏览器会话 JWT（Bearer）+ 浏览器头。
+pub fn issue_attachment_upload(
+    token: &str,
+    owner: &str,
+    name: &str,
+    file_path: &std::path::Path,
+) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
+    let bytes = std::fs::read(file_path).map_err(|e| anyhow!("读取附件 {} 失败: {}", file_path.display(), e))?;
+    let fname = file_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment")
+        .to_string();
+    let part = reqwest::blocking::multipart::Part::bytes(bytes)
+        .file_name(fname.clone())
+        .mime_str("application/octet-stream")
+        .unwrap_or_else(|_| reqwest::blocking::multipart::Part::bytes(Vec::new()));
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("type", "ISSUE")
+        .text("project_id", repo_id.clone())
+        .text("file_name", fname)
+        .part("file", part);
+    let url = format!(
+        "{}/api/v2/projects/{}/user_attachment/upload",
+        web_base().trim_end_matches('/'),
+        repo_id,
+    );
+    let page_ref = format!("https://gitcode.com/{}/issues", repo_path);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .multipart(form)
+        .send()
+        .context("请求 GitCode 附件上传接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 附件上传接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析附件上传响应失败")
 }
 
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）

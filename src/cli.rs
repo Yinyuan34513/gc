@@ -212,6 +212,15 @@ enum IssueAction {
         repo: String,
         #[arg(long)] title: String,
         #[arg(long, default_value = "")] body: String,
+        /// 附件（可重复多次）
+        #[arg(long, num_args = 0..)]
+        attach: Vec<String>,
+        /// 标签（可重复多次）
+        #[arg(long, num_args = 0..)]
+        label: Vec<String>,
+        /// 私有 Issue
+        #[arg(long)]
+        confidential: bool,
     },
 }
 
@@ -577,10 +586,34 @@ pub fn run() -> Result<()> {
                 let v = api.issue(&o, &n, number)?;
                 println!("{}", pretty(&v));
             }
-            IssueAction::Create { repo, title, body } => {
+            IssueAction::Create { repo, title, body, attach, label, confidential } => {
                 let (o, n) = split_repo(&repo)?;
-                let v = api.create_issue(&o, &n, &title, &body)?;
-                println!("已创建: #{} {}", v["number"].as_u64().unwrap_or(0), v["html_url"].as_str().unwrap_or(""));
+                let token = web_access_token()?;
+                // 数值型 project id（附件链接 user-attachments/files/{id}/... 用数值 id）
+                let project_id = api.repo(&o, &n)?
+                    ["id"].as_u64().unwrap_or(0);
+                // 构造描述：正文 + 附件链接（网页端把附件以 <a href> 形式嵌进 description）
+                let mut description = body.clone();
+                for f in &attach {
+                    let p = std::path::Path::new(f);
+                    let meta = crate::api::issue_attachment_upload(&token, &o, &n, p)?;
+                    let fname = meta["file_name"].as_str().unwrap_or("attachment");
+                    // 链接形如 https://gitcode.com/user-attachments/files/{project_id}/{file}
+                    // 注意：GitCode 可能把存储名改成内容哈希，若链接打不开请改用返回的元信息。
+                    let link = format!(
+                        "\n\n<a href=\"https://gitcode.com/user-attachments/files/{}/{}\" target=\"_blank\">{}</a>",
+                        project_id, fname, fname
+                    );
+                    description.push_str(&link);
+                    println!("已上传附件：{}（响应：{}）", fname, meta);
+                }
+                let v = crate::api::issue_create(&token, &o, &n, &title, &description, confidential, &label)?;
+                let iid = v["iid"].as_u64().unwrap_or(0);
+                let url = v["web_url"].as_str().unwrap_or("");
+                println!("已创建 Issue: #{} {}", iid, url);
+                if confidential {
+                    println!("（该 Issue 为私有）");
+                }
             }
         },
 
