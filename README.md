@@ -54,6 +54,8 @@ gc repo list owner               # 列出某用户的仓库
 gc repo clone owner/name [dest]  # 克隆（内部调用 git clone）
 gc repo create my-new-repo --description "..." --private   # 在当前用户名下建仓库
 gc repo tree owner/name [--ref main]   # 列出文件树（网页端 v2 接口）
+gc repo read owner/name <file> [--ref main] [--output path]   # 读取文件内容（网页端 v2 接口）
+gc repo download owner/name <file1> <file2> ... [--ref main] [--output dir]   # 多线程流式下载多个文件
 ```
 
 > `gc repo tree` 走的是网页端 v2 文件列表接口（`/api/v2/projects/{owner%2Fname}/repository/file-list`），

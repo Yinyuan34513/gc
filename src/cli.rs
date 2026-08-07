@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 
@@ -70,6 +71,30 @@ enum RepoAction {
         /// 分支 / 标签名，默认 main
         #[arg(long = "ref", default_value = "main")]
         branch: String,
+    },
+    /// 读取单个文件内容（网页端 v2 接口，类似网页 blob 页面）
+    Read {
+        repo: String,
+        /// 仓库内文件路径，如 src/api.rs
+        file: String,
+        /// 分支 / 标签名，默认 main
+        #[arg(long = "ref", default_value = "main")]
+        branch: String,
+        /// 把内容写到该文件（二进制文件必填，否则打印到终端）
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// 下载多个文件到本地目录（网页端 v2 接口，多线程流式下载）
+    Download {
+        repo: String,
+        /// 一个或多个仓库内文件路径，如 src/api.rs README.md
+        files: Vec<String>,
+        /// 分支 / 标签名，默认 main
+        #[arg(long = "ref", default_value = "main")]
+        branch: String,
+        /// 输出目录，默认当前目录
+        #[arg(long, default_value = ".")]
+        output: String,
     },
 }
 
@@ -294,6 +319,66 @@ pub fn run() -> Result<()> {
                 let files = crate::api::repo_file_list(&token, &o, &n, &branch)?;
                 print_tree(&files);
             }
+            RepoAction::Read { repo, file, branch, output } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let f = crate::api::repo_file_content(&token, &o, &n, &branch, &file)?;
+                let raw = if f.encoding.eq_ignore_ascii_case("base64") {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(f.content.trim())
+                        .map_err(|e| anyhow!("base64 解码失败: {}", e))?
+                } else {
+                    f.content.clone().into_bytes()
+                };
+                if let Some(out) = output {
+                    std::fs::write(&out, &raw).map_err(|e| anyhow!("写入 {} 失败: {}", out, e))?;
+                    println!("已写入 {} ({} 字节)", out, raw.len());
+                } else if is_text(&f.file_type, &raw) {
+                    if f.is_limited.unwrap_or(false) {
+                        eprintln!("警告：文件较大，内容被截断（is_limited）");
+                    }
+                    print!("{}", String::from_utf8_lossy(&raw));
+                } else {
+                    anyhow::bail!(
+                        "这是二进制文件（{}），请用 --output <path> 指定保存路径",
+                        f.file_type.unwrap_or_else(|| "未知类型".into())
+                    );
+                }
+            }
+            RepoAction::Download { repo, files, branch, output } => {
+                if files.is_empty() {
+                    anyhow::bail!("请至少指定一个要下载的文件");
+                }
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let out_dir = std::path::Path::new(&output);
+                println!(
+                    "下载 {} 个文件到 {}（分支 {}，线程数 {}）...",
+                    files.len(),
+                    out_dir.display(),
+                    branch,
+                    files.len()
+                );
+                let results = crate::api::download_files(&token, &o, &n, &branch, &files, out_dir)?;
+                let mut ok = 0;
+                let mut fail = 0;
+                for (f, r) in results {
+                    match r {
+                        Ok(bytes) => {
+                            println!("  ✓ {} ({} 字节)", f, bytes);
+                            ok += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  ✗ {} 失败: {}", f, e);
+                            fail += 1;
+                        }
+                    }
+                }
+                println!("下载完成：成功 {}，失败 {}", ok, fail);
+                if fail > 0 {
+                    std::process::exit(1);
+                }
+            }
         },
 
         Command::Issue(c) => match c.action {
@@ -507,6 +592,23 @@ struct Node {
     children: std::collections::BTreeMap<String, Node>,
 }
 
+/// 判断内容是否为文本（用于决定打印还是要求 --output 落盘）
+fn is_text(file_type: &Option<String>, raw: &[u8]) -> bool {
+    if let Some(t) = file_type {
+        if t.starts_with("text/") {
+            return true;
+        }
+        if t.contains("image/")
+            || t.contains("application/octet-stream")
+            || t.contains("application/zip")
+            || t.contains("application/gzip")
+        {
+            return false;
+        }
+    }
+    std::str::from_utf8(raw).is_ok()
+}
+
 /// 把扁平的文件路径列表渲染成 ASCII 树并打印
 fn print_tree(paths: &[String]) {
     print!("{}", build_tree_string(paths));
@@ -636,5 +738,13 @@ mod tests {
     #[test]
     fn test_build_tree_empty() {
         assert_eq!(build_tree_string(&[]), "(空仓库)");
+    }
+
+    #[test]
+    fn test_is_text() {
+        assert!(is_text(&Some("text/plain; charset=utf-8".into()), b"hello"));
+        assert!(!is_text(&Some("image/png".into()), &[0u8, 1, 2, 3]));
+        assert!(is_text(&None, b"plain ascii text"));
+        assert!(!is_text(&None, &[0u8, 0xff, 0xfe, 0x00]));
     }
 }

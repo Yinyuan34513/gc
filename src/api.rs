@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
 use serde_json::Value;
+use std::sync::Arc;
 use std::io::Read;
 
 /// 包装一个 Reader，每读出一段就推进进度条（用于上传进度显示）
@@ -385,6 +387,168 @@ pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> R
     }
     let v: FileList = serde_json::from_str(&text).context("解析文件列表响应失败")?;
     Ok(v.content)
+}
+
+/// 读取单个文件内容（网页端 v2 接口：GET /api/v2/projects/{owner%2Fname}/repository/files）
+/// 同样受 WAF 保护，需浏览器会话 JWT（Bearer）+ 浏览器头。
+/// 参数：ref（分支/标签）、file_path（仓库内路径，可含 /，不会像 path= 那样触发 WAF）、
+/// repoId（二次编码）。返回的 content 为 base64（encoding 字段为 "base64"）。
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
+pub struct WebFile {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub encoding: String,
+    #[serde(default)]
+    pub file_type: Option<String>,
+    pub content: String,
+    #[serde(default)]
+    pub is_limited: Option<bool>,
+}
+
+pub fn repo_file_content(
+    token: &str,
+    owner: &str,
+    name: &str,
+    r#ref: &str,
+    file_path: &str,
+) -> Result<WebFile> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
+    let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
+    let url = format!(
+        "{}/api/v2/projects/{}/repository/files?repoId={}&ref={}&file_path={}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        repo_id,
+        r#ref,
+        file_path,
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("Accept", "*/*")
+        .header("X-Platform", "web")
+        .send()
+        .context("请求 GitCode 文件内容接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 文件内容接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str::<WebFile>(&text).context("解析文件内容响应失败")
+}
+
+/// 多线程流式下载多个文件到本地目录（网页端 v2 /repository/files 接口）。
+/// 每个文件一个线程，HTTP 响应体通过 serde_json::from_reader 流式解析，base64 解码后
+/// 直接写入磁盘（不把解码结果整体堆在内存里）。返回每个文件的下载结果（成功则为字节数）。
+pub fn download_files(
+    token: &str,
+    owner: &str,
+    name: &str,
+    r#ref: &str,
+    files: &[String],
+    out_dir: &std::path::Path,
+) -> Result<Vec<(String, Result<u64>)>> {
+    let client = Arc::new(
+        reqwest::blocking::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+            )
+            .build()
+            .context("创建 HTTP 客户端失败")?,
+    );
+    let token = token.to_string();
+    let owner = owner.to_string();
+    let name = name.to_string();
+    let r#ref = r#ref.to_string();
+    let out_dir = out_dir.to_path_buf();
+
+    let mut handles = Vec::new();
+    for f in files {
+        let client = Arc::clone(&client);
+        let (token, owner, name, r#ref, out_dir, f) = (
+            token.clone(),
+            owner.clone(),
+            name.clone(),
+            r#ref.clone(),
+            out_dir.clone(),
+            f.clone(),
+        );
+        let h = std::thread::spawn(move || {
+            let res = download_one(&client, &token, &owner, &name, &r#ref, &f, &out_dir);
+            (f, res)
+        });
+        handles.push(h);
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for h in handles {
+        results.push(h.join().map_err(|_| anyhow!("下载线程崩溃"))?);
+    }
+    Ok(results)
+}
+
+/// 下载单个文件：GET /repository/files -> 流式解析 JSON -> base64 解码 -> 写磁盘
+fn download_one(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    r#ref: &str,
+    file_path: &str,
+    out_dir: &std::path::Path,
+) -> Result<u64> {
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
+    let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
+    let url = format!(
+        "{}/api/v2/projects/{}/repository/files?repoId={}&ref={}&file_path={}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        repo_id,
+        r#ref,
+        file_path,
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("Accept", "*/*")
+        .header("X-Platform", "web")
+        .send()
+        .context("请求 GitCode 文件内容接口失败")?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(anyhow!("文件内容接口错误 {}: {:?}", status, status.canonical_reason()));
+    }
+    // 流式解析 JSON 响应体（HTTP body 边收边解析），得到 WebFile
+    let wf = serde_json::from_reader::<_, WebFile>(resp).context("解析文件内容响应失败")?;
+    let raw = if wf.encoding.eq_ignore_ascii_case("base64") {
+        base64::engine::general_purpose::STANDARD
+            .decode(wf.content.trim())
+            .map_err(|e| anyhow!("base64 解码失败: {}", e))?
+    } else {
+        wf.content.clone().into_bytes()
+    };
+    let dest = out_dir.join(file_path);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| anyhow!("创建目录失败: {}", e))?;
+    }
+    std::fs::write(&dest, &raw).map_err(|e| anyhow!("写入 {} 失败: {}", dest.display(), e))?;
+    Ok(raw.len() as u64)
 }
 
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
