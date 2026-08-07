@@ -240,6 +240,20 @@ enum IssueAction {
         issue: u64,
         #[arg(long)] body: String,
     },
+    /// 编辑 Issue 的标题 / 描述
+    Edit {
+        repo: String,
+        issue: u64,
+        /// 新标题（不填则不修改标题）
+        #[arg(long)]
+        title: Option<String>,
+        /// 新描述（不填则若也未给 --file，则打开编辑器交互编辑当前描述）
+        #[arg(long)]
+        body: Option<String>,
+        /// 从文件读取描述
+        #[arg(long)]
+        file: Option<String>,
+    },
 }
 
 #[derive(Parser)]
@@ -673,6 +687,32 @@ pub fn run() -> Result<()> {
                     .and_then(|n0| n0["id"].as_u64())
                     .unwrap_or(0);
                 println!("已回复 Issue #{}（讨论：{} 评论 id：{}）", issue, discussion_id, note_id);
+            }
+            IssueAction::Edit { repo, issue, title, body, file } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let description = match (body, file) {
+                    (Some(b), _) => Some(b),
+                    (None, Some(f)) => Some(
+                        std::fs::read_to_string(&f)
+                            .map_err(|e| anyhow!("读取文件 {} 失败: {}", f, e))?,
+                    ),
+                    (None, None) => {
+                        // 未给 --body / --file：打开编辑器，初始内容为当前描述
+                        let cur = crate::api::issue_view(&token, &o, &n, issue)?;
+                        let initial = cur["description"].as_str().unwrap_or("").to_string();
+                        Some(edit_text(&initial)?)
+                    }
+                };
+                let v = crate::api::issue_edit(
+                    &token,
+                    &o,
+                    &n,
+                    issue,
+                    title.as_deref(),
+                    description.as_deref(),
+                )?;
+                println!("已编辑 Issue #{}：{}", v["iid"].as_u64().unwrap_or(issue), v["web_url"].as_str().unwrap_or(""));
             }
         },
 
@@ -1255,6 +1295,28 @@ fn build_node(node: &Node, prefix: &str, out: &mut String) {
             out,
         );
     }
+}
+
+/// 用系统默认编辑器交互编辑文本（类似 git commit 的编辑器体验）。
+/// 以 initial 作为初始内容写入临时文件，调用 $EDITOR / $VISUAL（回退 vi），
+/// 关闭后读回内容返回。用于 `gc issue edit` 等需要富文本输入的场景（SGA 编辑器入口）。
+fn edit_text(initial: &str) -> Result<String> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("gc-edit-{}.md", std::process::id()));
+    std::fs::write(&path, initial).map_err(|e| anyhow!("写入临时文件失败: {}", e))?;
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let status = std::process::Command::new(&editor)
+        .arg(&path)
+        .status()
+        .map_err(|e| anyhow!("启动编辑器 {} 失败: {}（可用 EDITOR 环境变量指定）", editor, e))?;
+    if !status.success() {
+        return Err(anyhow!("编辑器 {} 退出码异常", editor));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| anyhow!("读回临时文件失败: {}", e))?;
+    let _ = std::fs::remove_file(&path);
+    Ok(text)
 }
 
 /// 获取可用于讨论接口的 access token：

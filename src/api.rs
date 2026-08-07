@@ -1280,6 +1280,60 @@ pub fn issue_reply(token: &str, owner: &str, name: &str, iid: u64, body: &str) -
     serde_json::from_str(&text).context("解析回复 Issue 响应失败")
 }
 
+/// 编辑 Issue（网页端 v2）：PUT /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}
+/// body 可包含 title / description（逆向自网页「编辑」请求，仅传需要修改的字段）。
+/// 返回更新后的 Issue 完整 JSON。
+pub fn issue_edit(
+    token: &str,
+    owner: &str,
+    name: &str,
+    iid: u64,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let mut body = serde_json::Map::new();
+    if let Some(t) = title {
+        body.insert("title".to_string(), serde_json::Value::String(t.to_string()));
+    }
+    if let Some(d) = description {
+        body.insert("description".to_string(), serde_json::Value::String(d.to_string()));
+    }
+    let url = format!(
+        "{}/issuepr/api/v1/issue/{}/issues/{}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/issues/{}", repo_path, iid);
+    let resp = client
+        .put(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&serde_json::Value::Object(body))
+        .send()
+        .context("请求 GitCode 编辑 Issue 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 编辑 Issue 接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析编辑 Issue 响应失败")
+}
+
 /// 上传 Issue 附件：POST /api/v2/projects/{owner%252Fname}/user_attachment/upload
 /// 注意路径里的 owner 是「二次编码」(%252F)。以 multipart 携带文件字节（网页端上传附件的
 /// 实际传输方式；粘贴的抓包里 Content-Length 应是被截断的）。响应返回上传后的文件元信息。
