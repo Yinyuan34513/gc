@@ -81,6 +81,8 @@ gc issue create owner/name --title "bug" --body "..."
 gc issue create owner/name --title "bug" --body "..." --attach ./log.txt --label bug --confidential
 # 关闭（可一次多个编号）
 gc issue close owner/name 1 2 3
+# 重新打开（可一次多个编号）
+gc issue reopen owner/name 1 2 3
 # 回复（评论）某个 Issue
 gc issue reply owner/name 1 --body "已修复，请验证"
 

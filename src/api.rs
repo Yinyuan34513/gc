@@ -1195,6 +1195,45 @@ pub fn issue_close(token: &str, owner: &str, name: &str, iid: u64) -> Result<Val
     serde_json::from_str(&text).context("解析关闭 Issue 响应失败")
 }
 
+/// 重新打开 Issue（网页端 v2）：与关闭同一端点，仅 state_event 改为 "reopen"。
+pub fn issue_reopen(token: &str, owner: &str, name: &str, iid: u64) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body = serde_json::json!({ "state_event": "reopen", "discussions": "" });
+    let url = format!(
+        "{}/issuepr/api/v1/issue/{}/issues/{}/close",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/issues/{}", repo_path, iid);
+    let resp = client
+        .put(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&body)
+        .send()
+        .context("请求 GitCode 重新打开 Issue 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 重新打开 Issue 接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析重新打开 Issue 响应失败")
+}
+
 /// 回复 Issue（网页端 v2）：POST /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}/notes
 /// body：{"body":"..."}。端点为按 GitLab/GitCode 惯例推断（无抓包确认），若报错请贴出
 /// 网页端「回复」请求的 URL/body 以便校正。

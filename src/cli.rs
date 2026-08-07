@@ -228,6 +228,12 @@ enum IssueAction {
         #[arg(num_args = 1..)]
         issues: Vec<u64>,
     },
+    /// 重新打开 Issue（可同时指定多个编号）
+    Reopen {
+        repo: String,
+        #[arg(num_args = 1..)]
+        issues: Vec<u64>,
+    },
     /// 回复（评论）某个 Issue
     Reply {
         repo: String,
@@ -637,6 +643,16 @@ pub fn run() -> Result<()> {
                     let state = v["state"].as_str().unwrap_or("?");
                     let url = v["web_url"].as_str().unwrap_or("");
                     println!("已关闭 Issue #{}（状态：{}） {}", iid, state, url);
+                }
+            }
+            IssueAction::Reopen { repo, issues } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                for iid in &issues {
+                    let v = crate::api::issue_reopen(&token, &o, &n, *iid)?;
+                    let state = v["state"].as_str().unwrap_or("?");
+                    let url = v["web_url"].as_str().unwrap_or("");
+                    println!("已重新打开 Issue #{}（状态：{}） {}", iid, state, url);
                 }
             }
             IssueAction::Reply { repo, issue, body } => {
