@@ -26,6 +26,12 @@ enum Command {
     Token(TokenCmd),
     /// 仓库操作
     Repo(RepoCmd),
+    /// 列出仓库文件树（网页端 v2 接口，等价 repo tree）
+    Tree(TreeArgs),
+    /// 读取单个文件内容（网页端 v2 接口，等价 repo read）
+    Read(ReadArgs),
+    /// 下载多个文件到本地目录（网页端 v2 接口，等价 repo download）
+    Download(DownloadArgs),
     /// Issue 操作
     Issue(IssueCmd),
     /// Pull Request 操作
@@ -47,6 +53,41 @@ struct RepoCmd {
     #[command(subcommand)]
     action: RepoAction,
 }
+/// 共享参数：列出文件树（repo tree 与顶层 tree 共用）
+#[derive(Parser)]
+#[command(name = "tree")]
+struct TreeArgs {
+    repo: String,
+    #[arg(long = "ref", default_value = "main")]
+    branch: String,
+}
+
+/// 共享参数：读取单个文件（repo read 与顶层 read 共用）
+#[derive(Parser)]
+#[command(name = "read")]
+struct ReadArgs {
+    repo: String,
+    #[arg(help = "仓库内文件路径，如 src/api.rs")]
+    file: String,
+    #[arg(long = "ref", default_value = "main")]
+    branch: String,
+    #[arg(long)]
+    output: Option<String>,
+}
+
+/// 共享参数：下载多个文件（repo download 与顶层 download 共用）
+#[derive(Parser)]
+#[command(name = "download")]
+struct DownloadArgs {
+    repo: String,
+    #[arg(help = "一个或多个仓库内文件路径，如 src/api.rs README.md")]
+    files: Vec<String>,
+    #[arg(long = "ref", default_value = "main")]
+    branch: String,
+    #[arg(long, default_value = ".")]
+    output: String,
+}
+
 #[derive(Subcommand)]
 enum RepoAction {
     /// 查看仓库详情
@@ -78,36 +119,11 @@ enum RepoAction {
         private: bool,
     },
     /// 列出仓库文件树（网页端 v2 接口，类似网页 repo 页面的文件列表）
-    Tree {
-        repo: String,
-        /// 分支 / 标签名，默认 main
-        #[arg(long = "ref", default_value = "main")]
-        branch: String,
-    },
+    Tree(TreeArgs),
     /// 读取单个文件内容（网页端 v2 接口，类似网页 blob 页面）
-    Read {
-        repo: String,
-        /// 仓库内文件路径，如 src/api.rs
-        file: String,
-        /// 分支 / 标签名，默认 main
-        #[arg(long = "ref", default_value = "main")]
-        branch: String,
-        /// 把内容写到该文件（二进制文件必填，否则打印到终端）
-        #[arg(long)]
-        output: Option<String>,
-    },
+    Read(ReadArgs),
     /// 下载多个文件到本地目录（网页端 v2 接口，多线程流式下载）
-    Download {
-        repo: String,
-        /// 一个或多个仓库内文件路径，如 src/api.rs README.md
-        files: Vec<String>,
-        /// 分支 / 标签名，默认 main
-        #[arg(long = "ref", default_value = "main")]
-        branch: String,
-        /// 输出目录，默认当前目录
-        #[arg(long, default_value = ".")]
-        output: String,
-    },
+    Download(DownloadArgs),
 }
 
 #[derive(Parser)]
@@ -347,74 +363,9 @@ pub fn run() -> Result<()> {
                     println!("克隆: {}", http.ends_with(".git").then_some(http.to_string()).unwrap_or_else(|| format!("{}.git", http)));
                 }
             }
-            RepoAction::Tree { repo, branch } => {
-                let (o, n) = split_repo(&repo)?;
-                let token = web_access_token()?;
-                let files = crate::api::repo_file_list(&token, &o, &n, &branch)?;
-                print_tree(&files);
-            }
-            RepoAction::Read { repo, file, branch, output } => {
-                let (o, n) = split_repo(&repo)?;
-                let token = web_access_token()?;
-                let f = crate::api::repo_file_content(&token, &o, &n, &branch, &file)?;
-                let raw = if f.encoding.eq_ignore_ascii_case("base64") {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(f.content.trim())
-                        .map_err(|e| anyhow!("base64 解码失败: {}", e))?
-                } else {
-                    f.content.clone().into_bytes()
-                };
-                if let Some(out) = output {
-                    std::fs::write(&out, &raw).map_err(|e| anyhow!("写入 {} 失败: {}", out, e))?;
-                    println!("已写入 {} ({} 字节)", out, raw.len());
-                } else if is_text(&f.file_type, &raw) {
-                    if f.is_limited.unwrap_or(false) {
-                        eprintln!("警告：文件较大，内容被截断（is_limited）");
-                    }
-                    print!("{}", String::from_utf8_lossy(&raw));
-                } else {
-                    anyhow::bail!(
-                        "这是二进制文件（{}），请用 --output <path> 指定保存路径",
-                        f.file_type.unwrap_or_else(|| "未知类型".into())
-                    );
-                }
-            }
-            RepoAction::Download { repo, files, branch, output } => {
-                if files.is_empty() {
-                    anyhow::bail!("请至少指定一个要下载的文件");
-                }
-                let (o, n) = split_repo(&repo)?;
-                let token = web_access_token()?;
-                let out_dir = std::path::Path::new(&output);
-                println!(
-                    "下载 {} 个文件到 {}（分支 {}，线程数 {}）...",
-                    files.len(),
-                    out_dir.display(),
-                    branch,
-                    files.len()
-                );
-                let pairs: Vec<(String, String)> =
-                    files.iter().map(|f| (f.clone(), f.clone())).collect();
-                let results = crate::api::download_files(&token, &o, &n, &branch, &pairs, out_dir)?;
-                let mut ok = 0;
-                let mut fail = 0;
-                for (f, r) in results {
-                    match r {
-                        Ok(bytes) => {
-                            println!("  ✓ {} ({} 字节)", f, bytes);
-                            ok += 1;
-                        }
-                        Err(e) => {
-                            eprintln!("  ✗ {} 失败: {}", f, e);
-                            fail += 1;
-                        }
-                    }
-                }
-                println!("下载完成：成功 {}，失败 {}", ok, fail);
-                if fail > 0 {
-                    std::process::exit(1);
-                }
-            }
+            RepoAction::Tree(a) => run_tree(&a.repo, &a.branch)?,
+            RepoAction::Read(a) => run_read(&a.repo, &a.file, &a.branch, a.output.as_deref())?,
+            RepoAction::Download(a) => run_download(&a.repo, &a.files, &a.branch, &a.output)?,
         },
 
         Command::Issue(c) => match c.action {
@@ -582,8 +533,87 @@ pub fn run() -> Result<()> {
                 println!("已保存网页端 token 到 {}", config::config_path()?.display());
             }
         },
+        Command::Tree(a) => run_tree(&a.repo, &a.branch)?,
+        Command::Read(a) => run_read(&a.repo, &a.file, &a.branch, a.output.as_deref())?,
+        Command::Download(a) => run_download(&a.repo, &a.files, &a.branch, &a.output)?,
     }
 
+    Ok(())
+}
+
+/// 列出仓库文件树（repo tree 与顶层 tree 共用）
+fn run_tree(repo: &str, branch: &str) -> Result<()> {
+    let (o, n) = split_repo(repo)?;
+    let token = web_access_token()?;
+    let files = crate::api::repo_file_list(&token, &o, &n, branch)?;
+    print_tree(&files);
+    Ok(())
+}
+
+/// 读取单个文件内容（repo read 与顶层 read 共用）
+fn run_read(repo: &str, file: &str, branch: &str, output: Option<&str>) -> Result<()> {
+    let (o, n) = split_repo(repo)?;
+    let token = web_access_token()?;
+    let f = crate::api::repo_file_content(&token, &o, &n, branch, file)?;
+    let raw = if f.encoding.eq_ignore_ascii_case("base64") {
+        base64::engine::general_purpose::STANDARD
+            .decode(f.content.trim())
+            .map_err(|e| anyhow!("base64 解码失败: {}", e))?
+    } else {
+        f.content.clone().into_bytes()
+    };
+    if let Some(out) = output {
+        std::fs::write(out, &raw).map_err(|e| anyhow!("写入 {} 失败: {}", out, e))?;
+        println!("已写入 {} ({} 字节)", out, raw.len());
+    } else if is_text(&f.file_type, &raw) {
+        if f.is_limited.unwrap_or(false) {
+            eprintln!("警告：文件较大，内容被截断（is_limited）");
+        }
+        print!("{}", String::from_utf8_lossy(&raw));
+    } else {
+        anyhow::bail!(
+            "这是二进制文件（{}），请用 --output <path> 指定保存路径",
+            f.file_type.unwrap_or_else(|| "未知类型".into())
+        );
+    }
+    Ok(())
+}
+
+/// 下载多个文件（repo download 与顶层 download 共用）
+fn run_download(repo: &str, files: &[String], branch: &str, output: &str) -> Result<()> {
+    if files.is_empty() {
+        anyhow::bail!("请至少指定一个要下载的文件");
+    }
+    let (o, n) = split_repo(repo)?;
+    let token = web_access_token()?;
+    let out_dir = std::path::Path::new(output);
+    println!(
+        "下载 {} 个文件到 {}（分支 {}，线程数 {}）...",
+        files.len(),
+        out_dir.display(),
+        branch,
+        files.len()
+    );
+    let pairs: Vec<(String, String)> = files.iter().map(|f| (f.clone(), f.clone())).collect();
+    let results = crate::api::download_files(&token, &o, &n, branch, &pairs, out_dir)?;
+    let mut ok = 0;
+    let mut fail = 0;
+    for (f, r) in results {
+        match r {
+            Ok(bytes) => {
+                println!("  ✓ {} ({} 字节)", f, bytes);
+                ok += 1;
+            }
+            Err(e) => {
+                eprintln!("  ✗ {} 失败: {}", f, e);
+                fail += 1;
+            }
+        }
+    }
+    println!("下载完成：成功 {}，失败 {}", ok, fail);
+    if fail > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
