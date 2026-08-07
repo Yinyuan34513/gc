@@ -122,17 +122,6 @@ impl ApiClient {
     }
 
     // ---- Issue ----
-    pub fn issues(&self, owner: &str, name: &str, state: &str) -> Result<Value> {
-        self.get(
-            &format!("/repos/{}/{}/issues", owner, name),
-            &[("state", state)],
-        )
-    }
-
-    pub fn issue(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/issues/{}", owner, name, num), &[])
-    }
-
     // ---- Pull Request ----
     pub fn pulls(&self, owner: &str, name: &str, state: &str) -> Result<Value> {
         self.get(
@@ -1083,6 +1072,87 @@ pub fn issue_create(
         return Err(anyhow!("GitCode 创建 Issue 接口错误 {}: {}", status, text));
     }
     serde_json::from_str(&text).context("解析创建 Issue 响应失败")
+}
+
+/// 列出 Issue（网页端 v2）：GET /issuepr/api/v1/issue/{owner%2Fname}/issues
+/// state 映射：open -> opened（网页端用 opened/closed）。返回 Issue 数组。
+pub fn issue_list(token: &str, owner: &str, name: &str, state: &str) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let st = if state.eq_ignore_ascii_case("open") {
+        "opened"
+    } else if state.eq_ignore_ascii_case("close") || state.eq_ignore_ascii_case("closed") {
+        "closed"
+    } else {
+        state
+    };
+    let url = format!(
+        "{}/issuepr/api/v1/issue/{}/issues?state={}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        st,
+    );
+    let page_ref = format!("https://gitcode.com/{}/issues", repo_path);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .send()
+        .context("请求 GitCode Issue 列表接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode Issue 列表接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析 Issue 列表响应失败")
+}
+
+/// 查看单个 Issue（网页端 v2）：GET /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}
+/// 返回 Issue 完整 JSON（含 iid / web_url / description 等）。
+pub fn issue_view(token: &str, owner: &str, name: &str, iid: u64) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let url = format!(
+        "{}/issuepr/api/v1/issue/{}/issues/{}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/issues/{}", repo_path, iid);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .send()
+        .context("请求 GitCode Issue 详情接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode Issue 详情接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析 Issue 详情响应失败")
 }
 
 /// 上传 Issue 附件：POST /api/v2/projects/{owner%252Fname}/user_attachment/upload

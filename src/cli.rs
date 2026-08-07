@@ -571,11 +571,12 @@ pub fn run() -> Result<()> {
         Command::Issue(c) => match c.action {
             IssueAction::List { repo, state } => {
                 let (o, n) = split_repo(&repo)?;
-                let v = api.issues(&o, &n, &state)?;
+                let token = web_access_token()?;
+                let v = crate::api::issue_list(&token, &o, &n, &state)?;
                 print_list(&v, |it| {
                     format!(
                         "#{} [{}] {}",
-                        it["number"].as_u64().unwrap_or(0),
+                        it["iid"].as_u64().unwrap_or(0),
                         it["state"].as_str().unwrap_or("?"),
                         it["title"].as_str().unwrap_or("?")
                     )
@@ -583,7 +584,8 @@ pub fn run() -> Result<()> {
             }
             IssueAction::View { repo, number } => {
                 let (o, n) = split_repo(&repo)?;
-                let v = api.issue(&o, &n, number)?;
+                let token = web_access_token()?;
+                let v = crate::api::issue_view(&token, &o, &n, number)?;
                 println!("{}", pretty(&v));
             }
             IssueAction::Create { repo, title, body, attach, label, confidential } => {
