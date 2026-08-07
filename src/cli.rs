@@ -64,6 +64,13 @@ enum RepoAction {
         #[arg(long)]
         private: bool,
     },
+    /// 列出仓库文件树（网页端 v2 接口，类似网页 repo 页面的文件列表）
+    Tree {
+        repo: String,
+        /// 分支 / 标签名，默认 main
+        #[arg(long = "ref", default_value = "main")]
+        branch: String,
+    },
 }
 
 #[derive(Parser)]
@@ -281,6 +288,12 @@ pub fn run() -> Result<()> {
                     println!("克隆: {}", http.ends_with(".git").then_some(http.to_string()).unwrap_or_else(|| format!("{}.git", http)));
                 }
             }
+            RepoAction::Tree { repo, branch } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let files = crate::api::repo_file_list(&token, &o, &n, &branch)?;
+                print_tree(&files);
+            }
         },
 
         Command::Issue(c) => match c.action {
@@ -488,6 +501,56 @@ fn print_list(v: &Value, fmt: impl Fn(&Value) -> String) {
     }
 }
 
+/// 目录树节点（用于把扁平路径列表组装成树）
+#[derive(Default)]
+struct Node {
+    children: std::collections::BTreeMap<String, Node>,
+}
+
+/// 把扁平的文件路径列表渲染成 ASCII 树并打印
+fn print_tree(paths: &[String]) {
+    print!("{}", build_tree_string(paths));
+}
+
+/// 由扁平路径列表（如 ["src/api.rs", "README.md"]）构造目录树字符串
+fn build_tree_string(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return "(空仓库)".to_string();
+    }
+    let mut root = Node::default();
+    for p in paths {
+        let mut cur = &mut root;
+        for part in p.split('/') {
+            cur = cur.children.entry(part.to_string()).or_default();
+        }
+    }
+    let mut out = String::new();
+    let entries: Vec<(&String, &Node)> = root.children.iter().collect();
+    for (i, (name, child)) in entries.iter().enumerate() {
+        let last = i + 1 == entries.len();
+        out.push_str(name);
+        out.push('\n');
+        build_node(child, if last { "    " } else { "│   " }, &mut out);
+    }
+    out
+}
+
+fn build_node(node: &Node, prefix: &str, out: &mut String) {
+    let entries: Vec<(&String, &Node)> = node.children.iter().collect();
+    for (i, (name, child)) in entries.iter().enumerate() {
+        let last = i + 1 == entries.len();
+        out.push_str(prefix);
+        out.push_str(if last { "└── " } else { "├── " });
+        out.push_str(name);
+        out.push('\n');
+        build_node(
+            child,
+            &format!("{}{}", prefix, if last { "    " } else { "│   " }),
+            out,
+        );
+    }
+}
+
 /// 获取可用于讨论接口的 access token：
 /// - 若同时配置了 refresh token，则先刷新（并落盘）再返回；
 /// - 若只有 access token，则直接返回（不刷新，避免只带 access 调用会注销会话）；
@@ -549,5 +612,29 @@ mod tests {
         // 验证 clone_url 能拼出合法地址（真实 git 调用在 CLI 中执行）
         let (o, n) = split_repo("ghhhJoshrjnrhr/gb").unwrap();
         assert_eq!(config::clone_url(&o, &n), "https://gitcode.com/ghhhJoshrjnrhr/gb.git");
+    }
+
+    #[test]
+    fn test_build_tree_string() {
+        let paths = vec![
+            "README.md".to_string(),
+            "src/api.rs".to_string(),
+            "src/cli.rs".to_string(),
+            "src/sub/mod.rs".to_string(),
+        ];
+        let out = build_tree_string(&paths);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.contains(&"README.md"));
+        assert!(lines.iter().any(|l| l.contains("src")));
+        assert!(lines.iter().any(|l| l.contains("api.rs")));
+        assert!(lines.iter().any(|l| l.contains("cli.rs")));
+        assert!(lines.iter().any(|l| l.contains("sub")));
+        // 树形前缀应出现
+        assert!(out.contains("├──") || out.contains("└──"));
+    }
+
+    #[test]
+    fn test_build_tree_empty() {
+        assert_eq!(build_tree_string(&[]), "(空仓库)");
     }
 }

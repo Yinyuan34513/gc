@@ -339,6 +339,54 @@ pub fn delete_discussion(token: &str, id: &str) -> Result<Value> {
     serde_json::from_str(&text).context("解析 JSON 响应失败")
 }
 
+/// 列出仓库文件（网页端 v2 接口：GET /api/v2/projects/{owner%2Fname}/repository/file-list）
+/// 注意：该接口受 WAF 保护，需用浏览器会话 JWT（Bearer）+ 浏览器头，且 ref_name 必填
+/// （不传值会 418）。repoId 参数需对 owner/name 做「二次」百分号编码（/ -> %252F）。
+/// 返回扁平的文件路径列表（含子目录文件，如 "src/api.rs"），由调用方组装成树。
+pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> Result<Vec<String>> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（repoId 参数，二次编码）
+    let url = format!(
+        "{}/api/v2/projects/{}/repository/file-list?repoId={}&ref_name={}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        repo_id,
+        ref_name,
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("Accept", "*/*")
+        .header("X-Platform", "web")
+        .send()
+        .context("请求 GitCode 文件列表接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 文件列表接口错误 {}: {}", status, text));
+    }
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    #[derive(serde::Deserialize)]
+    struct FileList {
+        #[serde(default)]
+        content: Vec<String>,
+    }
+    let v: FileList = serde_json::from_str(&text).context("解析文件列表响应失败")?;
+    Ok(v.content)
+}
+
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
 /// 必须在 Cookie 里同时携带旧的 access 与 refresh，否则服务端会注销会话。
 /// 返回新的 (access, refresh)。token 会同时出现在 JSON body 与 Set-Cookie 中。

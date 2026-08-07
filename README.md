@@ -53,7 +53,11 @@ gc repo list                      # 列出当前用户的仓库
 gc repo list owner               # 列出某用户的仓库
 gc repo clone owner/name [dest]  # 克隆（内部调用 git clone）
 gc repo create my-new-repo --description "..." --private   # 在当前用户名下建仓库
+gc repo tree owner/name [--ref main]   # 列出文件树（网页端 v2 接口）
 ```
+
+> `gc repo tree` 走的是网页端 v2 文件列表接口（`/api/v2/projects/{owner%2Fname}/repository/file-list`），
+> 需要网页端 JWT（`gc web-token set`），且 `ref_name` 必填。它返回扁平路径列表，`gc` 在本地组装成 ASCII 树。
 
 ### Issue / PR `gc issue` / `gc pr`
 
