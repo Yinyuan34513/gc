@@ -134,6 +134,9 @@ enum RepoAction {
         /// 新仓库描述
         #[arg(long, default_value = "")]
         description: String,
+        /// fork 后在「当前 git 仓库」里添加 upstream 远程（指向源仓库），不自动克隆
+        #[arg(long)]
+        link_remote: bool,
     },
     /// 给仓库点 Star（网页端 v2 接口）
     Star { repo: String },
@@ -413,7 +416,7 @@ pub fn run() -> Result<()> {
                     println!("克隆: {}", http.ends_with(".git").then_some(http.to_string()).unwrap_or_else(|| format!("{}.git", http)));
                 }
             }
-            RepoAction::Fork { repo, name, description } => {
+            RepoAction::Fork { repo, name, description, link_remote } => {
                 let (o, n) = split_repo(&repo)?;
                 let token = web_access_token()?;
                 let new_name = name.unwrap_or_else(|| n.clone());
@@ -425,6 +428,9 @@ pub fn run() -> Result<()> {
                 }
                 if let Some(u) = v["web_url"].as_str() {
                     println!("地址: {}", u);
+                }
+                if link_remote {
+                    link_upstream_remote(&repo)?;
                 }
             }
             RepoAction::Star { repo } => {
@@ -776,6 +782,40 @@ fn run_download(repo: &str, files: &[String], branch: &str, output: &str) -> Res
     println!("下载完成：成功 {}，失败 {}", ok, fail);
     if fail > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// fork 后在当前 git 仓库里添加 upstream 远程（指向源仓库 owner/name）。
+/// 不自动克隆：仅在当前目录已是 git 仓库时生效；upstream 已存在则跳过。
+fn link_upstream_remote(repo: &str) -> Result<()> {
+    let in_git = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !in_git {
+        eprintln!(
+            "⚠ --link-remote 需要在 git 仓库目录内执行（当前目录不是 git 仓库），已跳过 upstream 设置"
+        );
+        return Ok(());
+    }
+    let source_url = format!("https://gitcode.com/{}.git", repo);
+    let existing = std::process::Command::new("git")
+        .args(["remote", "get-url", "upstream"])
+        .output();
+    if existing.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("⚠ upstream 远程已存在，跳过");
+        return Ok(());
+    }
+    let status = std::process::Command::new("git")
+        .args(["remote", "add", "upstream", &source_url])
+        .status()
+        .map_err(|e| anyhow!("执行 git remote add 失败: {}", e))?;
+    if status.success() {
+        println!("已在当前仓库添加 upstream -> {}", source_url);
+    } else {
+        eprintln!("⚠ 添加 upstream 失败: {}", source_url);
     }
     Ok(())
 }
