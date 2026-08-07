@@ -1,0 +1,553 @@
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use serde_json::Value;
+
+use crate::api::ApiClient;
+use crate::config;
+
+#[derive(Parser)]
+#[command(
+    name = "gc",
+    version,
+    about = "GitCode (AtomGit) 命令行工具，类似 gh",
+    arg_required_else_help = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// 检查当前 token 是否有效
+    Auth,
+    /// 管理个人访问令牌
+    Token(TokenCmd),
+    /// 仓库操作
+    Repo(RepoCmd),
+    /// Issue 操作
+    Issue(IssueCmd),
+    /// Pull Request 操作
+    Pr(PrCmd),
+    /// 发行版操作
+    Release(ReleaseCmd),
+    /// 搜索（仓库 / 用户 / Issue）
+    Search(SearchCmd),
+    /// 讨论（Discussions，网页端 v1 接口）
+    Discussion(DiscussionCmd),
+    /// 刷新网页端 JWT（用于讨论等 v1 接口）
+    Refresh,
+    /// 管理网页端 JWT（access / refresh token）
+    WebToken(WebTokenCmd),
+}
+
+#[derive(Parser)]
+struct RepoCmd {
+    #[command(subcommand)]
+    action: RepoAction,
+}
+#[derive(Subcommand)]
+enum RepoAction {
+    /// 查看仓库详情
+    View { repo: String },
+    /// 列出仓库（省略 owner 则列出当前用户）
+    List { owner: Option<String> },
+    /// 克隆仓库到本地（默认克隆到 ./<name>）
+    Clone { repo: String, dest: Option<String> },
+    /// 在当前用户命名空间下创建新仓库
+    Create {
+        /// 仓库名称（仅名称，不含 owner）
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// 是否设为私有仓库
+        #[arg(long)]
+        private: bool,
+    },
+}
+
+#[derive(Parser)]
+struct TokenCmd {
+    #[command(subcommand)]
+    action: TokenAction,
+}
+#[derive(Subcommand)]
+enum TokenAction {
+    /// 交互式输入并把 token 保存到 ~/.config/gitcode.toml
+    Set,
+}
+
+#[derive(Parser)]
+struct IssueCmd {
+    #[command(subcommand)]
+    action: IssueAction,
+}
+#[derive(Subcommand)]
+enum IssueAction {
+    /// 列出 Issue
+    List {
+        repo: String,
+        #[arg(long, default_value = "open")]
+        state: String,
+    },
+    /// 查看某个 Issue
+    View { repo: String, number: u64 },
+    /// 创建 Issue
+    Create {
+        repo: String,
+        #[arg(long)] title: String,
+        #[arg(long, default_value = "")] body: String,
+    },
+}
+
+#[derive(Parser)]
+struct PrCmd {
+    #[command(subcommand)]
+    action: PrAction,
+}
+#[derive(Subcommand)]
+enum PrAction {
+    /// 列出 Pull Request
+    List {
+        repo: String,
+        #[arg(long, default_value = "open")]
+        state: String,
+    },
+    /// 查看某个 PR
+    View { repo: String, number: u64 },
+    /// 创建 Pull Request
+    Create {
+        repo: String,
+        #[arg(long)] title: String,
+        #[arg(long, default_value = "")] body: String,
+        #[arg(long)] head: String,
+        #[arg(long)] base: String,
+    },
+}
+
+#[derive(Parser)]
+struct ReleaseCmd {
+    #[command(subcommand)]
+    action: ReleaseAction,
+}
+#[derive(Subcommand)]
+enum ReleaseAction {
+    /// 列出发行版
+    List { repo: String },
+    /// 查看某个发行版
+    View { repo: String, tag: String },
+    /// 创建发行版
+    Create {
+        repo: String,
+        tag: String,
+        #[arg(long)] name: String,
+        #[arg(long, default_value = "")] body: String,
+        #[arg(long, default_value = "")] target: String,
+    },
+    /// 上传附件到发行版
+    Upload { repo: String, tag: String, file: String },
+}
+
+#[derive(Parser)]
+struct SearchCmd {
+    #[command(subcommand)]
+    action: SearchAction,
+}
+#[derive(Subcommand)]
+enum SearchAction {
+    /// 搜索仓库
+    Repos { query: String },
+    /// 搜索用户
+    Users { query: String },
+    /// 搜索 Issue
+    Issues { query: String },
+}
+
+#[derive(Parser)]
+struct DiscussionCmd {
+    #[command(subcommand)]
+    action: DiscussionAction,
+}
+#[derive(Subcommand)]
+enum DiscussionAction {
+    /// 在仓库讨论区创建一条讨论
+    Create {
+        /// 仓库数字 ID（如 10544417，从仓库页面的 page-repo-id 获取）
+        #[arg(long)]
+        source_id: u64,
+        /// 来源类型，默认 2
+        #[arg(long, default_value_t = 2)]
+        source_type: u64,
+        /// 讨论分类 ID（创建页 URL 中 /discussions/create/<hash> 的 hash）
+        #[arg(long)]
+        category_id: String,
+        #[arg(long)] title: String,
+        /// 讨论正文（Markdown）
+        #[arg(long, default_value = "")] content: String,
+    },
+    /// 删除一条讨论（id 为讨论的 hash，取自讨论页 URL）
+    Delete {
+        /// 讨论的 hash id（讨论页 URL 中 /discussions/<hash> 的 hash）
+        id: String,
+    },
+}
+
+#[derive(Parser)]
+struct WebTokenCmd {
+    #[command(subcommand)]
+    action: WebTokenAction,
+}
+#[derive(Subcommand)]
+enum WebTokenAction {
+    /// 交互式录入网页端 access / refresh token 并保存到配置
+    Set,
+}
+
+pub fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let token = config::load_token()?;
+    let api = ApiClient::new(config::api_base(), token)?;
+
+    match cli.command {
+        Command::Auth => {
+            let u = api.authenticated_user()?;
+            println!(
+                "已认证: {} ({})",
+                u["login"].as_str().unwrap_or("?"),
+                u["name"].as_str().unwrap_or("?")
+            );
+        }
+
+        Command::Token(c) => match c.action {
+            TokenAction::Set => {
+                let token = config::prompt_and_save_token()?;
+                println!("token 已保存到 {}", config::config_path()?.display());
+                // 验证一下
+                let check = ApiClient::new(config::api_base(), Some(token))?;
+                match check.authenticated_user() {
+                    Ok(u) => println!(
+                        "验证成功: {} ({})",
+                        u["login"].as_str().unwrap_or("?"),
+                        u["name"].as_str().unwrap_or("?")
+                    ),
+                    Err(e) => eprintln!("警告：保存成功但验证失败: {}", e),
+                }
+            }
+        },
+
+        Command::Repo(c) => match c.action {
+            RepoAction::View { repo } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.repo(&o, &n)?;
+                println!("{}", pretty(&v));
+            }
+            RepoAction::List { owner } => {
+                let v = api.repos(owner.as_deref())?;
+                print_list(&v, |it| {
+                    let full = it["full_name"].as_str().unwrap_or("?");
+                    let desc = it["description"].as_str().unwrap_or("");
+                    if desc.is_empty() {
+                        full.to_string()
+                    } else {
+                        format!("{} — {}", full, desc)
+                    }
+                });
+            }
+            RepoAction::Clone { repo, dest } => {
+                let (o, n) = split_repo(&repo)?;
+                let url = config::clone_url(&o, &n);
+                let mut cmd = std::process::Command::new("git");
+                cmd.arg("clone").arg(&url);
+                if let Some(d) = dest {
+                    cmd.arg(d);
+                }
+                println!("克隆 {} ...", url);
+                let status = cmd.status().map_err(|e| anyhow::anyhow!("执行 git clone 失败: {}", e))?;
+                if !status.success() {
+                    anyhow::bail!("git clone 退出码非零");
+                }
+            }
+            RepoAction::Create { name, description, private } => {
+                let v = api.create_repo(&name, &description, private)?;
+                let full = v["full_name"].as_str().unwrap_or(&name);
+                println!("已创建仓库: {}", full);
+                if let Some(u) = v["html_url"].as_str() {
+                    println!("地址: {}", u);
+                }
+                if let Some(ssh) = v["ssh_url"].as_str() {
+                    println!("SSH : {}", ssh);
+                }
+                if let Some(http) = v["html_url"].as_str() {
+                    println!("克隆: {}", http.ends_with(".git").then_some(http.to_string()).unwrap_or_else(|| format!("{}.git", http)));
+                }
+            }
+        },
+
+        Command::Issue(c) => match c.action {
+            IssueAction::List { repo, state } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.issues(&o, &n, &state)?;
+                print_list(&v, |it| {
+                    format!(
+                        "#{} [{}] {}",
+                        it["number"].as_u64().unwrap_or(0),
+                        it["state"].as_str().unwrap_or("?"),
+                        it["title"].as_str().unwrap_or("?")
+                    )
+                });
+            }
+            IssueAction::View { repo, number } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.issue(&o, &n, number)?;
+                println!("{}", pretty(&v));
+            }
+            IssueAction::Create { repo, title, body } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.create_issue(&o, &n, &title, &body)?;
+                println!("已创建: #{} {}", v["number"].as_u64().unwrap_or(0), v["html_url"].as_str().unwrap_or(""));
+            }
+        },
+
+        Command::Pr(c) => match c.action {
+            PrAction::List { repo, state } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.pulls(&o, &n, &state)?;
+                print_list(&v, |it| {
+                    format!(
+                        "#{} [{}] {}",
+                        it["number"].as_u64().unwrap_or(0),
+                        it["state"].as_str().unwrap_or("?"),
+                        it["title"].as_str().unwrap_or("?")
+                    )
+                });
+            }
+            PrAction::View { repo, number } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.pull(&o, &n, number)?;
+                println!("{}", pretty(&v));
+            }
+            PrAction::Create { repo, title, body, head, base } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.create_pull(&o, &n, &title, &body, &head, &base)?;
+                println!("已创建 PR: #{} {}", v["number"].as_u64().unwrap_or(0), v["html_url"].as_str().unwrap_or(""));
+            }
+        },
+
+        Command::Release(c) => match c.action {
+            ReleaseAction::List { repo } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.releases(&o, &n)?;
+                print_list(&v, |it| {
+                    format!(
+                        "{} ({}) — {}",
+                        it["tag_name"].as_str().unwrap_or("?"),
+                        it["name"].as_str().unwrap_or(""),
+                        it["body"].as_str().unwrap_or("")
+                    )
+                });
+            }
+            ReleaseAction::View { repo, tag } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.release(&o, &n, &tag)?;
+                println!("{}", pretty(&v));
+            }
+            ReleaseAction::Create { repo, tag, name, body, target } => {
+                let (o, n) = split_repo(&repo)?;
+                let rname = if name.is_empty() { tag.clone() } else { name };
+                let v = api.create_release(&o, &n, &tag, &rname, &body, &target)?;
+                println!("已创建发行版: {} {}", v["tag_name"].as_str().unwrap_or(""), v["html_url"].as_str().unwrap_or(""));
+            }
+            ReleaseAction::Upload { repo, tag, file } => {
+                let (o, n) = split_repo(&repo)?;
+                let path = std::path::Path::new(&file);
+                let v = api.upload_asset(&o, &n, &tag, path)?;
+                println!("已上传附件: {}", v["name"].as_str().unwrap_or(&file));
+            }
+        },
+
+        Command::Search(c) => match c.action {
+            SearchAction::Repos { query } => {
+                let v = api.search_repos(&query)?;
+                print_list(&v, |it| {
+                    let full = it["full_name"].as_str().unwrap_or("?");
+                    let desc = it["description"].as_str().unwrap_or("");
+                    if desc.is_empty() {
+                        full.to_string()
+                    } else {
+                        format!("{} — {}", full, desc)
+                    }
+                });
+            }
+            SearchAction::Users { query } => {
+                let v = api.search_users(&query)?;
+                print_list(&v, |it| {
+                    let login = it["login"].as_str().unwrap_or("?");
+                    let name = it["name"].as_str().unwrap_or("");
+                    if name.is_empty() {
+                        login.to_string()
+                    } else {
+                        format!("{} ({})", login, name)
+                    }
+                });
+            }
+            SearchAction::Issues { query } => {
+                let v = api.search_issues(&query)?;
+                print_list(&v, |it| {
+                    format!(
+                        "#{} [{}] {}",
+                        it["number"].as_u64().unwrap_or(0),
+                        it["state"].as_str().unwrap_or("?"),
+                        it["title"].as_str().unwrap_or("?")
+                    )
+                });
+            }
+        },
+
+        Command::Discussion(c) => match c.action {
+            DiscussionAction::Create {
+                source_id,
+                source_type,
+                category_id,
+                title,
+                content,
+            } => {
+                let token = web_access_token()?;
+                let v = crate::api::create_discussion(
+                    &token,
+                    source_id,
+                    source_type,
+                    &category_id,
+                    &title,
+                    &content,
+                )?;
+                println!("已创建讨论，ID: {}", v);
+            }
+            DiscussionAction::Delete { id } => {
+                let token = web_access_token()?;
+                crate::api::delete_discussion(&token, &id)?;
+                println!("已删除讨论: {}", id);
+            }
+        },
+
+        Command::Refresh => {
+            let (access, refresh) = config::load_web_tokens()?;
+            if refresh.trim().is_empty() {
+                anyhow::bail!(
+                    "刷新需要 refresh token。请同时配置 GITCODE_WEB_REFRESH_TOKEN。\
+                     \n注意：只带 access token 调刷新接口会让服务端注销会话！"
+                );
+            }
+            let (na, nr) = crate::api::refresh_web_token(&access, &refresh)?;
+            config::save_web_tokens(&na, &nr)?;
+            println!("网页端 token 已刷新并保存到 {}", config::config_path()?.display());
+        }
+
+        Command::WebToken(c) => match c.action {
+            WebTokenAction::Set => {
+                config::prompt_and_save_web_tokens()?;
+                println!("已保存网页端 token 到 {}", config::config_path()?.display());
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// owner/name -> (owner, name)
+fn split_repo(s: &str) -> Result<(String, String)> {
+    let mut it = s.splitn(2, '/');
+    let o = it.next().ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
+    let n = it.next().ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
+    if o.is_empty() || n.is_empty() {
+        anyhow::bail!("仓库格式应为 owner/name");
+    }
+    Ok((o.to_string(), n.to_string()))
+}
+
+fn pretty(v: &Value) -> String {
+    serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+}
+
+/// 打印列表：兼容直接数组与 { "data": [...] } 两种返回结构
+fn print_list(v: &Value, fmt: impl Fn(&Value) -> String) {
+    let arr = match v {
+        Value::Array(a) => Some(a),
+        Value::Object(o) => o.get("data").and_then(|d| d.as_array()),
+        _ => None,
+    };
+    match arr {
+        Some(a) => {
+            if a.is_empty() {
+                println!("(无结果)");
+            }
+            for it in a {
+                println!("{}", fmt(it));
+            }
+        }
+        None => println!("{}", pretty(v)),
+    }
+}
+
+/// 获取可用于讨论接口的 access token：
+/// - 若同时配置了 refresh token，则先刷新（并落盘）再返回；
+/// - 若只有 access token，则直接返回（不刷新，避免只带 access 调用会注销会话）；
+/// - 刷新失败时回退到已有 access token。
+fn web_access_token() -> Result<String> {
+    let (access, refresh) = match config::load_web_tokens() {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
+    if refresh.trim().is_empty() {
+        return Ok(access);
+    }
+    match crate::api::refresh_web_token(&access, &refresh) {
+        Ok((new_access, new_refresh)) => {
+            let _ = config::save_web_tokens(&new_access, &new_refresh);
+            Ok(new_access)
+        }
+        Err(e) => {
+            eprintln!("警告：自动刷新 token 失败（{}），将使用现有 token", e);
+            Ok(access)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_repo_ok() {
+        assert_eq!(
+            split_repo("alice/demo").unwrap(),
+            ("alice".to_string(), "demo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_split_repo_keeps_subpath_name() {
+        // 仓库名里带斜杠不应被拆分
+        assert_eq!(
+            split_repo("org/some/repo").unwrap(),
+            ("org".to_string(), "some/repo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_split_repo_missing_slash() {
+        assert!(split_repo("justname").is_err());
+    }
+
+    #[test]
+    fn test_split_repo_empty_parts() {
+        assert!(split_repo("/demo").is_err());
+        assert!(split_repo("alice/").is_err());
+    }
+
+    #[test]
+    fn test_clone_invokes_git() {
+        // 验证 clone_url 能拼出合法地址（真实 git 调用在 CLI 中执行）
+        let (o, n) = split_repo("ghhhJoshrjnrhr/gb").unwrap();
+        assert_eq!(config::clone_url(&o, &n), "https://gitcode.com/ghhhJoshrjnrhr/gb.git");
+    }
+}
