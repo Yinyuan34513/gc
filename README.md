@@ -51,7 +51,8 @@ gc refresh
 gc repo view owner/name          # 查看仓库详情
 gc repo list                      # 列出当前用户的仓库
 gc repo list owner               # 列出某用户的仓库
-gc repo clone owner/name [dest]  # 克隆（内部调用 git clone）
+gc repo clone owner/name [dest]                       # 克隆（内部调用 git clone）
+gc repo clone owner/name --api [--path src] [--ref main] [dest]   # 不用 git，直接走网页端 v2 接口下载整个文件树（--path 只下某子目录）
 gc repo create my-new-repo --description "..." --private   # 在当前用户名下建仓库
 gc repo tree owner/name [--ref main]   # 列出文件树（网页端 v2 接口）
 gc repo read owner/name <file> [--ref main] [--output path]   # 读取文件内容（网页端 v2 接口）

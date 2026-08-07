@@ -54,7 +54,19 @@ enum RepoAction {
     /// 列出仓库（省略 owner 则列出当前用户）
     List { owner: Option<String> },
     /// 克隆仓库到本地（默认克隆到 ./<name>）
-    Clone { repo: String, dest: Option<String> },
+    Clone {
+        repo: String,
+        dest: Option<String>,
+        /// 用网页端 v2 接口直接下载整个文件树（不需要 git）
+        #[arg(long)]
+        api: bool,
+        /// 仅下载该子目录（如 src），默认整个仓库（仅 --api 模式生效）
+        #[arg(long, default_value = "")]
+        path: String,
+        /// 分支 / 标签名，默认 main（仅 --api 模式生效）
+        #[arg(long = "ref", default_value = "main")]
+        branch: String,
+    },
     /// 在当前用户命名空间下创建新仓库
     Create {
         /// 仓库名称（仅名称，不含 owner）
@@ -285,18 +297,40 @@ pub fn run() -> Result<()> {
                     }
                 });
             }
-            RepoAction::Clone { repo, dest } => {
+            RepoAction::Clone { repo, dest, api, path, branch } => {
                 let (o, n) = split_repo(&repo)?;
-                let url = config::clone_url(&o, &n);
-                let mut cmd = std::process::Command::new("git");
-                cmd.arg("clone").arg(&url);
-                if let Some(d) = dest {
-                    cmd.arg(d);
-                }
-                println!("克隆 {} ...", url);
-                let status = cmd.status().map_err(|e| anyhow::anyhow!("执行 git clone 失败: {}", e))?;
-                if !status.success() {
-                    anyhow::bail!("git clone 退出码非零");
+                if api {
+                    let token = web_access_token()?;
+                    let out_dir = dest.clone().unwrap_or_else(|| n.clone());
+                    let out_path = std::path::Path::new(&out_dir);
+                    let scope = if path.trim().is_empty() {
+                        "整个仓库".to_string()
+                    } else {
+                        format!("子目录 {}", path.trim_matches('/'))
+                    };
+                    println!(
+                        "通过网页端接口克隆文件树 {}（{}，分支 {}） -> {}",
+                        repo, scope, branch, out_dir
+                    );
+                    let (ok, fail) = crate::api::download_tree(&token, &o, &n, &branch, &path, out_path)?;
+                    println!("下载完成：成功 {}，失败 {}", ok, fail);
+                    if fail > 0 {
+                        std::process::exit(1);
+                    }
+                } else {
+                    let url = config::clone_url(&o, &n);
+                    let mut cmd = std::process::Command::new("git");
+                    cmd.arg("clone").arg(&url);
+                    if let Some(d) = dest {
+                        cmd.arg(d);
+                    }
+                    println!("克隆 {} ...", url);
+                    let status = cmd
+                        .status()
+                        .map_err(|e| anyhow::anyhow!("执行 git clone 失败: {}", e))?;
+                    if !status.success() {
+                        anyhow::bail!("git clone 退出码非零");
+                    }
                 }
             }
             RepoAction::Create { name, description, private } => {
@@ -359,7 +393,9 @@ pub fn run() -> Result<()> {
                     branch,
                     files.len()
                 );
-                let results = crate::api::download_files(&token, &o, &n, &branch, &files, out_dir)?;
+                let pairs: Vec<(String, String)> =
+                    files.iter().map(|f| (f.clone(), f.clone())).collect();
+                let results = crate::api::download_files(&token, &o, &n, &branch, &pairs, out_dir)?;
                 let mut ok = 0;
                 let mut fail = 0;
                 for (f, r) in results {

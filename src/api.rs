@@ -345,6 +345,20 @@ pub fn delete_discussion(token: &str, id: &str) -> Result<Value> {
 /// 注意：该接口受 WAF 保护，需用浏览器会话 JWT（Bearer）+ 浏览器头，且 ref_name 必填
 /// （不传值会 418）。repoId 参数需对 owner/name 做「二次」百分号编码（/ -> %252F）。
 /// 返回扁平的文件路径列表（含子目录文件，如 "src/api.rs"），由调用方组装成树。
+/// 该接口分页，这里会自动翻页拉全量。
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct FileList {
+    #[serde(default)]
+    page_num: u32,
+    #[serde(default)]
+    page_size: u32,
+    #[serde(default)]
+    page_count: u32,
+    #[serde(default)]
+    content: Vec<String>,
+}
+
 pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> Result<Vec<String>> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(
@@ -356,37 +370,136 @@ pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> R
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（repoId 参数，二次编码）
-    let url = format!(
+    let base = format!(
         "{}/api/v2/projects/{}/repository/file-list?repoId={}&ref_name={}",
         web_base().trim_end_matches('/'),
         path_seg,
         repo_id,
         ref_name,
     );
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .header("Origin", "https://gitcode.com")
-        .header("Referer", "https://gitcode.com/")
-        .header("Accept", "*/*")
-        .header("X-Platform", "web")
-        .send()
-        .context("请求 GitCode 文件列表接口失败")?;
-    let status = resp.status();
-    let text = resp.text().context("读取响应体失败")?;
-    if !status.is_success() {
-        return Err(anyhow!("GitCode 文件列表接口错误 {}: {}", status, text));
+    let mut all = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let url = format!("{}&page_num={}&page_size=100", base, page);
+        let resp = client
+            .get(&url)
+            .bearer_auth(token)
+            .header("Origin", "https://gitcode.com")
+            .header("Referer", "https://gitcode.com/")
+            .header("Accept", "*/*")
+            .header("X-Platform", "web")
+            .send()
+            .context("请求 GitCode 文件列表接口失败")?;
+        let status = resp.status();
+        let text = resp.text().context("读取响应体失败")?;
+        if !status.is_success() {
+            return Err(anyhow!("GitCode 文件列表接口错误 {}: {}", status, text));
+        }
+        if text.trim().is_empty() {
+            break;
+        }
+        let v: FileList = serde_json::from_str(&text).context("解析文件列表响应失败")?;
+        all.extend(v.content);
+        if v.page_count == 0 || v.page_num >= v.page_count {
+            break;
+        }
+        page += 1;
     }
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
+    Ok(all)
+}
+
+/// 按 root 过滤子树，并去掉 root 前缀（root="" 表示整库）。纯函数，便于测试。
+fn filter_subtree(files: &[String], root: &str) -> Vec<String> {
+    let root = root.trim_matches('/');
+    if root.is_empty() {
+        return files.to_vec();
     }
-    #[derive(serde::Deserialize)]
-    struct FileList {
-        #[serde(default)]
-        content: Vec<String>,
+    let prefix = format!("{}/", root);
+    files
+        .iter()
+        .filter(|p| *p == root || p.starts_with(&prefix))
+        .map(|p| {
+            if *p == root {
+                p.clone()
+            } else {
+                p[prefix.len()..].to_string()
+            }
+        })
+        .collect()
+}
+
+/// 通过网页端 v2 接口"克隆"整个目录树（不需要 git）：
+/// 1) 用 file-list 拿到扁平文件列表；2) 按 root 过滤子树；3) 多线程流式下载到 out_dir。
+/// 返回 (成功数, 失败数)。
+pub fn download_tree(
+    token: &str,
+    owner: &str,
+    name: &str,
+    r#ref: &str,
+    root: &str,
+    out_dir: &std::path::Path,
+) -> Result<(usize, usize)> {
+    let files = repo_file_list(token, owner, name, r#ref)?;
+    let root = root.trim_matches('/');
+    let local_paths = filter_subtree(&files, root);
+    if local_paths.is_empty() {
+        return Ok((0, 0));
     }
-    let v: FileList = serde_json::from_str(&text).context("解析文件列表响应失败")?;
-    Ok(v.content)
+    // (api_path, local_rel_path)：子树克隆时 api 用完整路径，写盘用去掉 root 前缀的路径
+    let pairs: Vec<(String, String)> = local_paths
+        .iter()
+        .map(|local| {
+            let api = if root.is_empty() {
+                local.clone()
+            } else {
+                format!("{}/{}", root, local)
+            };
+            (api, local.clone())
+        })
+        .collect();
+    let results = download_files(token, owner, name, r#ref, &pairs, out_dir)?;
+    let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
+    let fail = results.len() - ok;
+    Ok((ok, fail))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_subtree_full() {
+        let files = vec![
+            "a.txt".to_string(),
+            "src/b.rs".to_string(),
+            "src/x/c.rs".to_string(),
+        ];
+        assert_eq!(filter_subtree(&files, ""), files);
+    }
+
+    #[test]
+    fn test_filter_subtree_subdir() {
+        let files = vec![
+            "a.txt".to_string(),
+            "src/b.rs".to_string(),
+            "src/x/c.rs".to_string(),
+            "other/d.rs".to_string(),
+        ];
+        let got = filter_subtree(&files, "src");
+        assert_eq!(
+            got,
+            vec!["b.rs".to_string(), "x/c.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_filter_subtree_root_file() {
+        let files = vec!["README.md".to_string(), "src/a.rs".to_string()];
+        assert_eq!(
+            filter_subtree(&files, "README.md"),
+            vec!["README.md".to_string()]
+        );
+    }
 }
 
 /// 读取单个文件内容（网页端 v2 接口：GET /api/v2/projects/{owner%2Fname}/repository/files）
@@ -452,12 +565,15 @@ pub fn repo_file_content(
 /// 多线程流式下载多个文件到本地目录（网页端 v2 /repository/files 接口）。
 /// 每个文件一个线程，HTTP 响应体通过 serde_json::from_reader 流式解析，base64 解码后
 /// 直接写入磁盘（不把解码结果整体堆在内存里）。返回每个文件的下载结果（成功则为字节数）。
+/// files 中每个元素是 (api_path, local_rel_path)：
+/// - api_path   : 用于 API 请求（仓库内完整路径，如 src/api.rs）
+/// - local_rel_path : 用于写盘（相对 out_dir，子目录克隆时会去掉 root 前缀）
 pub fn download_files(
     token: &str,
     owner: &str,
     name: &str,
     r#ref: &str,
-    files: &[String],
+    files: &[(String, String)],
     out_dir: &std::path::Path,
 ) -> Result<Vec<(String, Result<u64>)>> {
     let client = Arc::new(
@@ -476,19 +592,22 @@ pub fn download_files(
     let out_dir = out_dir.to_path_buf();
 
     let mut handles = Vec::new();
-    for f in files {
+    for (api_path, local_path) in files {
         let client = Arc::clone(&client);
-        let (token, owner, name, r#ref, out_dir, f) = (
+        let (token, owner, name, r#ref, out_dir, api_path, local_path) = (
             token.clone(),
             owner.clone(),
             name.clone(),
             r#ref.clone(),
             out_dir.clone(),
-            f.clone(),
+            api_path.clone(),
+            local_path.clone(),
         );
         let h = std::thread::spawn(move || {
-            let res = download_one(&client, &token, &owner, &name, &r#ref, &f, &out_dir);
-            (f, res)
+            let res = download_one(
+                &client, &token, &owner, &name, &r#ref, &api_path, &local_path, &out_dir,
+            );
+            (api_path, res)
         });
         handles.push(h);
     }
@@ -507,7 +626,8 @@ fn download_one(
     owner: &str,
     name: &str,
     r#ref: &str,
-    file_path: &str,
+    api_file_path: &str,
+    local_rel_path: &str,
     out_dir: &std::path::Path,
 ) -> Result<u64> {
     let repo_path = format!("{}/{}", owner, name);
@@ -519,7 +639,7 @@ fn download_one(
         path_seg,
         repo_id,
         r#ref,
-        file_path,
+        api_file_path,
     );
     let resp = client
         .get(&url)
@@ -543,7 +663,7 @@ fn download_one(
     } else {
         wf.content.clone().into_bytes()
     };
-    let dest = out_dir.join(file_path);
+    let dest = out_dir.join(local_rel_path);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| anyhow!("创建目录失败: {}", e))?;
     }
