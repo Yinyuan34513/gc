@@ -125,6 +125,16 @@ enum RepoAction {
         #[arg(long)]
         private: bool,
     },
+    /// Fork 仓库到当前用户命名空间（网页端 v2 接口）
+    Fork {
+        repo: String,
+        /// 新仓库名称（默认与源仓库同名，冲突时服务端自动加后缀）
+        #[arg(long)]
+        name: Option<String>,
+        /// 新仓库描述
+        #[arg(long, default_value = "")]
+        description: String,
+    },
     /// 列出仓库文件树（网页端 v2 接口，类似网页 repo 页面的文件列表）
     Tree(TreeArgs),
     /// 读取单个文件内容（网页端 v2 接口，类似网页 blob 页面）
@@ -357,8 +367,15 @@ pub fn run() -> Result<()> {
                         "通过网页端接口克隆文件树 {}（{}，分支 {}） -> {}",
                         repo, scope, branch, out_dir
                     );
-                    let (ok, fail) = crate::api::download_tree(&token, &o, &n, &branch, &path, out_path)?;
+                    let (ok, fail, limited) =
+                        crate::api::download_tree(&token, &o, &n, &branch, &path, out_path)?;
                     println!("下载完成：成功 {}，失败 {}", ok, fail);
+                    if limited > 0 {
+                        eprintln!(
+                            "⚠ 有 {} 个文件被服务端限流（内容为空/截断），请用 `gc repo clone` 之外的 `git clone` 获取完整内容",
+                            limited
+                        );
+                    }
                     if fail > 0 {
                         std::process::exit(1);
                     }
@@ -390,6 +407,20 @@ pub fn run() -> Result<()> {
                 }
                 if let Some(http) = v["html_url"].as_str() {
                     println!("克隆: {}", http.ends_with(".git").then_some(http.to_string()).unwrap_or_else(|| format!("{}.git", http)));
+                }
+            }
+            RepoAction::Fork { repo, name, description } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let new_name = name.unwrap_or_else(|| n.clone());
+                let v = crate::api::fork_repo(&token, &o, &n, &new_name, &description)?;
+                let full = v["path_with_namespace"].as_str().unwrap_or(&new_name);
+                println!("已 fork: {}", full);
+                if let Some(u) = v["http_url_to_repo"].as_str() {
+                    println!("克隆: {}", u);
+                }
+                if let Some(u) = v["web_url"].as_str() {
+                    println!("地址: {}", u);
                 }
             }
             RepoAction::Tree(a) => run_tree(&a.repo, &a.branch)?,
@@ -661,9 +692,16 @@ fn run_read(repo: &str, file: &str, branch: &str, output: Option<&str>) -> Resul
     if let Some(out) = output {
         std::fs::write(out, &raw).map_err(|e| anyhow!("写入 {} 失败: {}", out, e))?;
         println!("已写入 {} ({} 字节)", out, raw.len());
+        if f.is_limited.unwrap_or(false) {
+            eprintln!(
+                "⚠ 该文件被服务端限流（is_limited），写入的内容可能为空或被截断，请用 `gc repo clone` 获取完整文件"
+            );
+        }
     } else if is_text(&f.file_type, &raw) {
         if f.is_limited.unwrap_or(false) {
-            eprintln!("警告：文件较大，内容被截断（is_limited）");
+            eprintln!(
+                "⚠ 该文件被服务端限流（is_limited），以下内容为截断/空，请用 `gc repo clone` 获取完整文件："
+            );
         }
         print!("{}", String::from_utf8_lossy(&raw));
     } else {
@@ -696,8 +734,13 @@ fn run_download(repo: &str, files: &[String], branch: &str, output: &str) -> Res
     let mut fail = 0;
     for (f, r) in results {
         match r {
-            Ok(bytes) => {
+            Ok((bytes, limited)) => {
                 println!("  ✓ {} ({} 字节)", f, bytes);
+                if limited {
+                    eprintln!(
+                        "    ⚠ 该文件被服务端限流（is_limited），内容可能为空或被截断，请用 `gc repo clone` 获取完整文件"
+                    );
+                }
                 ok += 1;
             }
             Err(e) => {

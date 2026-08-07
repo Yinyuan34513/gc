@@ -444,12 +444,12 @@ pub fn download_tree(
     r#ref: &str,
     root: &str,
     out_dir: &std::path::Path,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, usize)> {
     let files = repo_file_list(token, owner, name, r#ref)?;
     let root = root.trim_matches('/');
     let local_paths = filter_subtree(&files, root);
     if local_paths.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
     // (api_path, local_rel_path)：子树克隆时 api 用完整路径，写盘用去掉 root 前缀的路径
     let pairs: Vec<(String, String)> = local_paths
@@ -466,7 +466,11 @@ pub fn download_tree(
     let results = download_files(token, owner, name, r#ref, &pairs, out_dir)?;
     let ok = results.iter().filter(|(_, r)| r.is_ok()).count();
     let fail = results.len() - ok;
-    Ok((ok, fail))
+    let limited = results
+        .iter()
+        .filter(|(_, r)| matches!(r, Ok((_, true))))
+        .count();
+    Ok((ok, fail, limited))
 }
 
 /// 用户资料（网页端 v1 接口 /uc/api/v1/user/setting/profile?username=）
@@ -650,7 +654,7 @@ pub fn download_files(
     r#ref: &str,
     files: &[(String, String)],
     out_dir: &std::path::Path,
-) -> Result<Vec<(String, Result<u64>)>> {
+) -> Result<Vec<(String, Result<(u64, bool)>)>> {
     let client = Arc::new(
         reqwest::blocking::Client::builder()
             .user_agent(
@@ -704,7 +708,7 @@ fn download_one(
     api_file_path: &str,
     local_rel_path: &str,
     out_dir: &std::path::Path,
-) -> Result<u64> {
+) -> Result<(u64, bool)> {
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
     let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
@@ -731,6 +735,7 @@ fn download_one(
     }
     // 流式解析 JSON 响应体（HTTP body 边收边解析），得到 WebFile
     let wf = serde_json::from_reader::<_, WebFile>(resp).context("解析文件内容响应失败")?;
+    let is_limited = wf.is_limited.unwrap_or(false);
     let raw = if wf.encoding.eq_ignore_ascii_case("base64") {
         base64::engine::general_purpose::STANDARD
             .decode(wf.content.trim())
@@ -743,7 +748,60 @@ fn download_one(
         std::fs::create_dir_all(parent).map_err(|e| anyhow!("创建目录失败: {}", e))?;
     }
     std::fs::write(&dest, &raw).map_err(|e| anyhow!("写入 {} 失败: {}", dest.display(), e))?;
-    Ok(raw.len() as u64)
+    Ok((raw.len() as u64, is_limited))
+}
+
+/// Fork 一个仓库到当前网页登录用户的命名空间（网页端 v2 接口：POST /api/v2/projects/{owner%2Fname}/fork）
+/// 需要浏览器会话 JWT（Bearer）+ 浏览器头。body 字段（逆向自网页请求）：
+/// repoId（owner%2Fname 单次编码）、path、name（新仓库名，冲突时服务端自动加后缀）、
+/// description、fetch_refs=default。返回新建仓库的完整 JSON。
+pub fn fork_repo(
+    token: &str,
+    owner: &str,
+    name: &str,
+    new_name: &str,
+    description: &str,
+) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body = serde_json::json!({
+        "repoId": path_seg,
+        "path": new_name,
+        "name": new_name,
+        "description": description,
+        "fetch_refs": "default",
+    });
+    let url = format!(
+        "{}/api/v2/projects/{}/fork",
+        web_base().trim_end_matches('/'),
+        path_seg,
+    );
+    let page_ref = format!("https://gitcode.com/{}", repo_path);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&body)
+        .send()
+        .context("请求 GitCode fork 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode fork 接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str::<Value>(&text).context("解析 fork 响应失败")
 }
 
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
