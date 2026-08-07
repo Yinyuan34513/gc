@@ -137,6 +137,17 @@ enum RepoAction {
         /// fork 后在「当前 git 仓库」里添加 upstream 远程（指向源仓库），不自动克隆
         #[arg(long)]
         link_remote: bool,
+        /// fork 后将可见性设为私有（默认公开；fork 接口本身不支持该参数，会再用 v5 补一次更新）
+        #[arg(long)]
+        private: bool,
+    },
+    /// 同步 fork 仓库与其上游（网页端 v2 接口）
+    Sync { repo: String },
+    /// 设置仓库可见性：gc repo set owner/name <private|public>（v5 开放 API）
+    Set {
+        repo: String,
+        /// private 或 public
+        visibility: String,
     },
     /// 给仓库点 Star（网页端 v2 接口）
     Star { repo: String },
@@ -416,7 +427,7 @@ pub fn run() -> Result<()> {
                     println!("克隆: {}", http.ends_with(".git").then_some(http.to_string()).unwrap_or_else(|| format!("{}.git", http)));
                 }
             }
-            RepoAction::Fork { repo, name, description, link_remote } => {
+            RepoAction::Fork { repo, name, description, link_remote, private } => {
                 let (o, n) = split_repo(&repo)?;
                 let token = web_access_token()?;
                 let new_name = name.unwrap_or_else(|| n.clone());
@@ -432,6 +443,45 @@ pub fn run() -> Result<()> {
                 if link_remote {
                     link_upstream_remote(&repo)?;
                 }
+                if private {
+                    // fork 接口本身不支持可见性参数，这里用 v5 PATCH 补一次
+                    let full = v["path_with_namespace"].as_str().unwrap_or(&new_name);
+                    let (po, pn) = split_repo(full)?;
+                    let pv = api.set_repo_visibility(&po, &pn, true)?;
+                    let vis = pv["visibility"].as_str().unwrap_or("?");
+                    println!("已将可见性设为：{}", vis);
+                }
+            }
+            RepoAction::Sync { repo } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let (_started, msg) = crate::api::sync_repo(&token, &o, &n)?;
+                println!("已提交同步任务：{}", msg);
+                let mut done = false;
+                for _ in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let (ok, m) = crate::api::sync_repo_status(&token, &o, &n)?;
+                    if ok {
+                        println!("同步完成：{}", m);
+                        done = true;
+                        break;
+                    }
+                }
+                if !done {
+                    eprintln!("同步任务已提交，但轮询超时（60s），可在网页查看状态");
+                }
+            }
+            RepoAction::Set { repo, visibility } => {
+                let vis = visibility.to_lowercase();
+                let private = match vis.as_str() {
+                    "private" => true,
+                    "public" => false,
+                    _ => anyhow::bail!("可见性必须是 private 或 public，收到：{}", visibility),
+                };
+                let (o, n) = split_repo(&repo)?;
+                let v = api.set_repo_visibility(&o, &n, private)?;
+                let got = v["visibility"].as_str().unwrap_or("?");
+                println!("已将 {} 的可见性设为：{}", repo, got);
             }
             RepoAction::Star { repo } => {
                 let (o, n) = split_repo(&repo)?;

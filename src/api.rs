@@ -76,6 +76,10 @@ impl ApiClient {
         self.request(reqwest::Method::POST, path, &[], Some(body))
     }
 
+    pub fn patch(&self, path: &str, body: &Value) -> Result<Value> {
+        self.request(reqwest::Method::PATCH, path, &[], Some(body))
+    }
+
     // ---- 认证 ----
     pub fn authenticated_user(&self) -> Result<Value> {
         self.get("/user", &[])
@@ -101,6 +105,14 @@ impl ApiClient {
             "private": private,
         });
         self.post("/user/repos", &body)
+    }
+
+    /// 设置仓库可见性（v5 开放 API：PATCH /repos/{owner}/{name}）
+    /// v5 是部分更新，body 仅传 private 即可。private=true 私有，false 公开。
+    /// 用 PAT（access_token），与 fork 用的网页 JWT 不同源。
+    pub fn set_repo_visibility(&self, owner: &str, name: &str, private: bool) -> Result<Value> {
+        let body = serde_json::json!({ "private": private });
+        self.patch(&format!("/repos/{}/{}", owner, name), &body)
     }
 
     // ---- Issue ----
@@ -870,6 +882,85 @@ pub fn unstar_repo(token: &str, project_id: u64) -> Result<u64> {
     }
     let v: Value = serde_json::from_str(&text).context("解析 unstar 响应失败")?;
     Ok(v["star_count"].as_u64().unwrap_or(0))
+}
+
+/// 同步 fork 仓库与其上游（网页端 v2 接口：PUT /api/v2/projects/{owner%2Fname}/sync_repo）
+/// body: {"branch":""} 表示同步默认分支。返回 (repo_sync_result, repo_sync_message)。
+/// 该接口仅「提交同步任务」，需再轮询 sync_repo_status 直到 success。
+pub fn sync_repo(token: &str, owner: &str, name: &str) -> Result<(bool, String)> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
+    let body = serde_json::json!({ "branch": "" });
+    let url = format!(
+        "{}/api/v2/projects/{}/sync_repo",
+        web_base().trim_end_matches('/'),
+        path_seg,
+    );
+    let resp = client
+        .put(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .context("请求 GitCode 同步接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 同步接口错误 {}: {}", status, text));
+    }
+    let v: Value = serde_json::from_str(&text).context("解析同步响应失败")?;
+    Ok((
+        v["repo_sync_result"].as_bool().unwrap_or(false),
+        v["repo_sync_message"].as_str().unwrap_or("").to_string(),
+    ))
+}
+
+/// 查询 fork 同步任务状态（网页端 v2 接口：GET /api/v2/projects/{owner%2Fname}/sync_repo?branch）
+/// 返回 (repo_sync_result, repo_sync_message)；result=true 且 message="success" 表示完成。
+pub fn sync_repo_status(token: &str, owner: &str, name: &str) -> Result<(bool, String)> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
+    let url = format!(
+        "{}/api/v2/projects/{}/sync_repo?branch",
+        web_base().trim_end_matches('/'),
+        path_seg,
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Accept", "*/*")
+        .send()
+        .context("请求 GitCode 同步状态接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 同步状态接口错误 {}: {}", status, text));
+    }
+    let v: Value = serde_json::from_str(&text).context("解析同步状态响应失败")?;
+    Ok((
+        v["repo_sync_result"].as_bool().unwrap_or(false),
+        v["repo_sync_message"].as_str().unwrap_or("").to_string(),
+    ))
 }
 
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
