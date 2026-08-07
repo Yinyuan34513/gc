@@ -257,13 +257,21 @@ enum PrAction {
     },
     /// 查看某个 PR
     View { repo: String, number: u64 },
-    /// 创建 Pull Request
+    /// 创建 Pull Request（创建前用网页端 v2 对比接口预览 diff）
     Create {
         repo: String,
         #[arg(long)] title: String,
         #[arg(long, default_value = "")] body: String,
+        /// 源分支（要合并的分支，对应 compare 的 from）
         #[arg(long)] head: String,
+        /// 目标分支（合并到的分支，对应 compare 的 to）
         #[arg(long)] base: String,
+        /// 跨仓库合并时的目标仓库 owner/name（默认与 repo 相同）
+        #[arg(long)]
+        target_repo: Option<String>,
+        /// 同时打印每个文件的具体 diff 文本
+        #[arg(long)]
+        patch: bool,
     },
 }
 
@@ -682,8 +690,17 @@ pub fn run() -> Result<()> {
                 let v = api.pull(&o, &n, number)?;
                 println!("{}", pretty(&v));
             }
-            PrAction::Create { repo, title, body, head, base } => {
+            PrAction::Create { repo, title, body, head, base, target_repo, patch } => {
                 let (o, n) = split_repo(&repo)?;
+                // 用网页端 v2 对比接口预览 diff（compare = pr create 的核心）
+                let token = web_access_token()?;
+                let (to, tnn) = match &target_repo {
+                    Some(t) => split_repo(t)?,
+                    None => (o.clone(), n.clone()),
+                };
+                let cmp = crate::api::repo_compare(&token, &o, &n, &to, &tnn, &head, &base)?;
+                print_compare(&cmp, patch);
+                // 创建 PR（v5 开放 API）
                 let v = api.create_pull(&o, &n, &title, &body, &head, &base)?;
                 println!("已创建 PR: #{} {}", v["number"].as_u64().unwrap_or(0), v["html_url"].as_str().unwrap_or(""));
             }
@@ -1121,6 +1138,51 @@ fn print_list(v: &Value, fmt: impl Fn(&Value) -> String) {
             }
         }
         None => println!("{}", pretty(v)),
+    }
+}
+
+/// 打印 compare 接口的对比结果（commits + diffs + 行数统计）
+fn print_compare(v: &Value, patch: bool) {
+    let same = v["compare_same_ref"].as_bool().unwrap_or(false);
+    let empty: Vec<Value> = Vec::new();
+    let commits = v["commits"].as_array().unwrap_or(&empty);
+    let diffs = v["diffs"].as_array().unwrap_or(&empty);
+    let added = v["added_lines"].as_u64().unwrap_or(0);
+    let removed = v["removed_lines"].as_u64().unwrap_or(0);
+
+    if same {
+        println!("两个引用相同，无差异。");
+        return;
+    }
+    println!("Commits ({}):", commits.len());
+    for c in commits {
+        let id = c["id"].as_str().unwrap_or("").chars().take(8).collect::<String>();
+        let title = c["title"]
+            .as_str()
+            .or_else(|| c["message"].as_str())
+            .unwrap_or("?");
+        let author = c["author_name"].as_str().or_else(|| c["committer_name"].as_str()).unwrap_or("");
+        println!("  {} {} {}", id, title, if author.is_empty() { String::new() } else { format!("({})", author) });
+    }
+    println!("变更文件 ({}):  +{} -{}", diffs.len(), added, removed);
+    for d in diffs {
+        let path = d["new_path"]
+            .as_str()
+            .or_else(|| d["old_path"].as_str())
+            .unwrap_or("?");
+        let new_file = d["new_file"].as_bool().unwrap_or(false);
+        let deleted = d["deleted_file"].as_bool().unwrap_or(false);
+        let tag = if new_file { "新增" } else if deleted { "删除" } else { "修改" };
+        let da = d["added_lines"].as_u64().unwrap_or(0);
+        let dr = d["removed_lines"].as_u64().unwrap_or(0);
+        println!("  [{}] {}  (+{} -{})", tag, path, da, dr);
+        if patch {
+            if let Some(txt) = d["diff"].as_str() {
+                for line in txt.lines() {
+                    println!("    {}", line);
+                }
+            }
+        }
     }
 }
 

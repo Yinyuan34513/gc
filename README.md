@@ -88,7 +88,10 @@ gc issue reply owner/name 1 --body "已修复，请验证"
 
 gc pr list owner/name
 gc pr view owner/name 3
+# 创建前用网页端 v2 对比接口预览 diff（compare = pr create 的核心）
 gc pr create owner/name --title "fix" --head dev --base main
+# 跨仓库合并 / 打印每个文件具体 diff
+gc pr create owner/name --title "fix" --head dev --base main --target-repo other/repo --patch
 ```
 
 ### 发行版 `gc release`

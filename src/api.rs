@@ -1334,6 +1334,58 @@ pub fn issue_attachment_upload(
     serde_json::from_str(&text).context("解析附件上传响应失败")
 }
 
+/// 对比两个分支/引用（网页端 v2）：GET /api/v2/projects/{owner%2Fname}/repository/compare
+/// 查询参数：repoId（当前仓库，二次编码）、target_id（目标仓库，二次编码，默认同 repo）、
+/// from（源分支）、to（目标分支）、ignore_whitespace_change。返回 commits / diffs / 行数统计。
+/// 逆向自网页「新建合并请求」页面的对比请求。
+pub fn repo_compare(
+    token: &str,
+    owner: &str,
+    name: &str,
+    target_owner: &str,
+    target_name: &str,
+    from: &str,
+    to: &str,
+) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let repo_id = repo_path.replace('/', "%252F"); // 二次编码（repoId / target_id）
+    let target_id = format!("{}/{}", target_owner, target_name).replace('/', "%252F");
+    let url = format!(
+        "{}/api/v2/projects/{}/repository/compare?repoId={}&target_id={}&ignore_whitespace_change=false&from={}&to={}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        repo_id,
+        target_id,
+        enc(from),
+        enc(to),
+    );
+    let page_ref = format!("https://gitcode.com/{}/pull/new", repo_path);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .send()
+        .context("请求 GitCode 对比接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 对比接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析对比响应失败")
+}
+
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
 /// 必须在 Cookie 里同时携带旧的 access 与 refresh，否则服务端会注销会话。
 /// 返回新的 (access, refresh)。token 会同时出现在 JSON body 与 Set-Cookie 中。
