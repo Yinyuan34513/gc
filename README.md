@@ -89,6 +89,8 @@ gc release upload owner/name v1.0.0 ./dist/app.tar.gz   # 上传附件（带进�
 gc search repos "关键词"
 gc search users "用户名"
 gc search issues "关键词"
+gc user view <username>                    # 查看用户资料（网页端 v1 接口）
+gc user avatar <username> [--output path]  # 获取 / 下载用户头像（不指定 --output 则只打印 URL）
 ```
 
 ### 讨论 `gc discussion`（网页端 v1 接口）

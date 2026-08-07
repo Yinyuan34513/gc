@@ -463,6 +463,65 @@ pub fn download_tree(
     Ok((ok, fail))
 }
 
+/// 用户资料（网页端 v1 接口 /uc/api/v1/user/setting/profile?username=）
+#[derive(serde::Deserialize, Debug)]
+pub struct UserProfile {
+    #[serde(default)]
+    pub profile: UserProfileInner,
+    pub nickname: String,
+    pub avatar: String,
+    pub user_id: String,
+    pub username: String,
+    #[serde(default)]
+    pub update_time: Option<String>,
+    #[serde(default)]
+    pub github_account: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub struct UserProfileInner {
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub company: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+/// 查看用户资料（网页端 v1 接口：GET /uc/api/v1/user/setting/profile?username=）
+/// 需浏览器会话 JWT（Bearer）+ 浏览器头。
+pub fn user_profile(token: &str, username: &str) -> Result<UserProfile> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let url = format!(
+        "{}/uc/api/v1/user/setting/profile?username={}",
+        web_base().trim_end_matches('/'),
+        username
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("Accept", "application/json, text/plain, */*")
+        .header("X-Platform", "web")
+        .send()
+        .context("请求 GitCode 用户资料接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 用户资料接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str::<UserProfile>(&text).context("解析用户资料响应失败")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +558,16 @@ mod tests {
             filter_subtree(&files, "README.md"),
             vec!["README.md".to_string()]
         );
+    }
+
+    #[test]
+    fn test_parse_user_profile() {
+        let json = r#"{"profile":{"website":null,"description":null,"company":null,"location":null},"nickname":"CNRio","avatar":"https://cdn-img.gitcode.com/x.png","user_id":"66ef1818ea29f30978f8509d","username":"dinofish","update_time":"2025-12-01T16:43:12.000+00:00","github_account":""}"#;
+        let p: UserProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p.username, "dinofish");
+        assert_eq!(p.nickname, "CNRio");
+        assert_eq!(p.avatar, "https://cdn-img.gitcode.com/x.png");
+        assert!(p.profile.description.is_none());
     }
 }
 

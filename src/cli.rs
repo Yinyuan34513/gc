@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -46,6 +46,8 @@ enum Command {
     Refresh,
     /// 管理网页端 JWT（access / refresh token）
     WebToken(WebTokenCmd),
+    /// 用户操作（网页端 v1 接口）
+    User(UserCmd),
 }
 
 #[derive(Parser)]
@@ -261,6 +263,24 @@ struct WebTokenCmd {
 enum WebTokenAction {
     /// 交互式录入网页端 access / refresh token 并保存到配置
     Set,
+}
+
+#[derive(Parser)]
+struct UserCmd {
+    #[command(subcommand)]
+    action: UserAction,
+}
+#[derive(Subcommand)]
+enum UserAction {
+    /// 查看用户资料（网页端 v1 接口）
+    View { username: String },
+    /// 获取 / 下载用户头像（网页端 v1 接口）
+    Avatar {
+        username: String,
+        /// 下载头像到该路径（不指定则只打印头像 URL）
+        #[arg(long)]
+        output: Option<String>,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -536,6 +556,73 @@ pub fn run() -> Result<()> {
         Command::Tree(a) => run_tree(&a.repo, &a.branch)?,
         Command::Read(a) => run_read(&a.repo, &a.file, &a.branch, a.output.as_deref())?,
         Command::Download(a) => run_download(&a.repo, &a.files, &a.branch, &a.output)?,
+        Command::User(c) => match c.action {
+            UserAction::View { username } => {
+                let token = web_access_token()?;
+                let p = crate::api::user_profile(&token, &username)?;
+                println!("用户名: {}", p.username);
+                println!("昵称:   {}", p.nickname);
+                if !p.user_id.is_empty() {
+                    println!("ID:     {}", p.user_id);
+                }
+                if let Some(bio) = &p.profile.description {
+                    if !bio.is_empty() {
+                        println!("简介:   {}", bio);
+                    }
+                }
+                if let Some(web) = &p.profile.website {
+                    if !web.is_empty() {
+                        println!("网站:   {}", web);
+                    }
+                }
+                if let Some(co) = &p.profile.company {
+                    if !co.is_empty() {
+                        println!("公司:   {}", co);
+                    }
+                }
+                if let Some(loc) = &p.profile.location {
+                    if !loc.is_empty() {
+                        println!("位置:   {}", loc);
+                    }
+                }
+                if let Some(gh) = &p.github_account {
+                    if !gh.is_empty() {
+                        println!("GitHub: {}", gh);
+                    }
+                }
+                println!("头像:   {}", p.avatar);
+                if let Some(t) = &p.update_time {
+                    println!("更新:   {}", t);
+                }
+            }
+            UserAction::Avatar { username, output } => {
+                let token = web_access_token()?;
+                let p = crate::api::user_profile(&token, &username)?;
+                if let Some(out) = output {
+                    let client = reqwest::blocking::Client::builder()
+                        .user_agent(
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+                        )
+                        .build()
+                        .context("创建 HTTP 客户端失败")?;
+                    let resp = client
+                        .get(&p.avatar)
+                        .header("User-Agent", "Mozilla/5.0")
+                        .send()
+                        .context("下载头像失败")?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        anyhow::bail!("下载头像失败 {}: {:?}", status, status.canonical_reason());
+                    }
+                    let bytes = resp.bytes().context("读取头像数据失败")?;
+                    std::fs::write(&out, &bytes).map_err(|e| anyhow!("写入 {} 失败: {}", out, e))?;
+                    println!("头像已下载: {} ({} 字节)", out, bytes.len());
+                } else {
+                    println!("{}", p.avatar);
+                }
+            }
+        },
     }
 
     Ok(())
