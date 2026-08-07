@@ -222,6 +222,18 @@ enum IssueAction {
         #[arg(long)]
         confidential: bool,
     },
+    /// 关闭 Issue（可同时指定多个编号）
+    Close {
+        repo: String,
+        #[arg(num_args = 1..)]
+        issues: Vec<u64>,
+    },
+    /// 回复（评论）某个 Issue
+    Reply {
+        repo: String,
+        issue: u64,
+        #[arg(long)] body: String,
+    },
 }
 
 #[derive(Parser)]
@@ -616,6 +628,23 @@ pub fn run() -> Result<()> {
                 if confidential {
                     println!("（该 Issue 为私有）");
                 }
+            }
+            IssueAction::Close { repo, issues } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                for iid in &issues {
+                    let v = crate::api::issue_close(&token, &o, &n, *iid)?;
+                    let state = v["state"].as_str().unwrap_or("?");
+                    let url = v["web_url"].as_str().unwrap_or("");
+                    println!("已关闭 Issue #{}（状态：{}） {}", iid, state, url);
+                }
+            }
+            IssueAction::Reply { repo, issue, body } => {
+                let (o, n) = split_repo(&repo)?;
+                let token = web_access_token()?;
+                let v = crate::api::issue_reply(&token, &o, &n, issue, &body)?;
+                let note_id = v["id"].as_u64().unwrap_or(0);
+                println!("已回复 Issue #{}（评论 id：{}）", issue, note_id);
             }
         },
 
