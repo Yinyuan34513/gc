@@ -93,7 +93,12 @@ struct DownloadArgs {
 #[derive(Subcommand)]
 enum RepoAction {
     /// 查看仓库详情
-    View { repo: String },
+    View {
+        repo: String,
+        /// 直接打印完整 JSON（默认打印精简摘要）
+        #[arg(long)]
+        json: bool,
+    },
     /// 列出仓库（省略 owner 则列出当前用户）
     List { owner: Option<String> },
     /// 克隆仓库到本地（默认克隆到 ./<name>）
@@ -316,10 +321,14 @@ pub fn run() -> Result<()> {
         },
 
         Command::Repo(c) => match c.action {
-            RepoAction::View { repo } => {
+            RepoAction::View { repo, json } => {
                 let (o, n) = split_repo(&repo)?;
                 let v = api.repo(&o, &n)?;
-                println!("{}", pretty(&v));
+                if json {
+                    println!("{}", pretty(&v));
+                } else {
+                    print_repo_summary(&v);
+                }
             }
             RepoAction::List { owner } => {
                 let v = api.repos(owner.as_deref())?;
@@ -717,6 +726,73 @@ fn split_repo(s: &str) -> Result<(String, String)> {
 
 fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+}
+
+/// 打印仓库精简摘要（替代原来整屏 JSON）。
+/// 字段缺失时自动跳过，license 可能是字符串或对象。
+fn print_repo_summary(v: &Value) {
+    let get = |k: &str| v[k].as_str();
+    if let Some(s) = get("full_name") {
+        println!("名称:     {}", s);
+    }
+    if let Some(s) = get("human_name").filter(|s| !s.is_empty()) {
+        println!("显示名:   {}", s);
+    }
+    if let Some(s) = get("description").filter(|s| !s.is_empty()) {
+        println!("描述:     {}", s);
+    }
+    if let Some(s) = get("default_branch") {
+        println!("默认分支: {}", s);
+    }
+    let visibility = if v["private"].as_bool() == Some(true) {
+        "私有"
+    } else {
+        "公开"
+    };
+    println!("可见性:   {}", visibility);
+    let stars = v["stargazers_count"].as_u64().unwrap_or(0);
+    let forks = v["forks_count"].as_u64().unwrap_or(0);
+    let issues = v["open_issues_count"].as_u64().unwrap_or(0);
+    let watch = v["watchers_count"].as_u64().unwrap_or(0);
+    println!(
+        "Star:     {}    Fork: {}    Issue: {}    Watch: {}",
+        stars, forks, issues, watch
+    );
+    // license 可能是字符串（"MIT_License"）或对象（含 "name"/"key"）
+    let license = match &v["license"] {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Object(o) => o
+            .get("name")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| o.get("key").and_then(|x| x.as_str()))
+            .map(|s| s.to_string()),
+        _ => None,
+    };
+    if let Some(s) = license {
+        println!("许可:     {}", s);
+    }
+    if let Some(s) = v["namespace"]["name"].as_str() {
+        println!("命名空间: {}", s);
+    }
+    if let Some(s) = v["owner"]["login"].as_str() {
+        println!("拥有者:   {}", s);
+    }
+    if let Some(s) = get("created_at").filter(|s| !s.is_empty()) {
+        println!("创建:     {}", s);
+    }
+    if let Some(s) = get("updated_at").filter(|s| !s.is_empty()) {
+        println!("更新:     {}", s);
+    }
+    if let Some(s) = get("http_url_to_repo") {
+        println!("克隆(HTTPS): {}", s);
+    }
+    if let Some(s) = get("ssh_url_to_repo") {
+        println!("克隆(SSH):   {}", s);
+    }
+    if let Some(s) = get("web_url") {
+        println!("地址:     {}", s);
+    }
 }
 
 /// 打印列表：兼容直接数组与 { "data": [...] } 两种返回结构

@@ -48,7 +48,8 @@ gc refresh
 ### 仓库 `gc repo`
 
 ```bash
-gc repo view owner/name          # 查看仓库详情
+gc repo view owner/name          # 查看仓库详情（精简摘要）
+gc repo view owner/name --json    # 查看完整 JSON 元数据
 gc repo list                      # 列出当前用户的仓库
 gc repo list owner               # 列出某用户的仓库
 gc repo clone owner/name [dest]                       # 克隆（内部调用 git clone）
@@ -118,6 +119,8 @@ gc discussion delete cd921cf8f66f441cb07cbea7135e10ca
 - **创建讨论用 JSON 而非 form**：字段是 snake_case（`title` / `md_content` / `source_id` / `source_type` / `category_id`）。
 - **删除讨论用 hash 不是数字 id**：hash 取自讨论页 URL。
 - **刷新 token 必须同时带 access + refresh**：只带 access 调 `GET /uc/api/v1/user/oauth/token` 会让服务端注销当前会话。
+- **大文件走 blob 接口会被限流**：`repo read` / `repo download` 用的是网页端 `/repository/files`，服务端对超大文件（如几十 MB 的 rar）会返回 `is_limited: true` 且 `content` 为空——此时读到 0 字节是正常的，这类文件请改用 `gc repo clone` 拿完整内容。
+- **`file_path` / `ref` 会做百分号编码**：`&`、中文、空格等特殊字符会被编码后放进 query，避免 `&` 被当成参数分隔符导致 404（实测裸 `&` 会返回 "file not found"。）
 
 ## 许可
 

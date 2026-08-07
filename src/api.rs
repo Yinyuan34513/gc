@@ -256,6 +256,12 @@ impl ApiClient {
 // cookie 的 GITCODE_ACCESS_TOKEN 拷贝）。下面的字段名是逆向推断的，可能需要按真实
 // 请求体校准。
 
+/// 对 URL query 参数值做百分号编码：非 unreserved 字符（含 / & = 空格 中文等）全部编码。
+/// 用于 file_path / ref 等参数，避免 "&" 被当成 query 分隔符、中文/特殊字符导致 404。
+fn enc(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
 /// 讨论接口基址，可用 GITCODE_WEB_BASE 覆盖（默认网页端）
 pub fn web_base() -> String {
     std::env::var("GITCODE_WEB_BASE")
@@ -375,7 +381,7 @@ pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> R
         web_base().trim_end_matches('/'),
         path_seg,
         repo_id,
-        ref_name,
+        enc(ref_name),
     );
     let mut all = Vec::new();
     let mut page = 1u32;
@@ -611,8 +617,8 @@ pub fn repo_file_content(
         web_base().trim_end_matches('/'),
         path_seg,
         repo_id,
-        r#ref,
-        file_path,
+        enc(r#ref),
+        enc(file_path),
     );
     let resp = client
         .get(&url)
@@ -707,8 +713,8 @@ fn download_one(
         web_base().trim_end_matches('/'),
         path_seg,
         repo_id,
-        r#ref,
-        api_file_path,
+        enc(r#ref),
+        enc(api_file_path),
     );
     let resp = client
         .get(&url)
