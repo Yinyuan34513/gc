@@ -1101,11 +1101,14 @@ fn print_repo_summary(v: &Value) {
     }
 }
 
-/// 打印列表：兼容直接数组与 { "data": [...] } 两种返回结构
+/// 打印列表：兼容直接数组、{ "data": [...] } 与 { "issues": [...] } 三种返回结构
 fn print_list(v: &Value, fmt: impl Fn(&Value) -> String) {
     let arr = match v {
         Value::Array(a) => Some(a),
-        Value::Object(o) => o.get("data").and_then(|d| d.as_array()),
+        Value::Object(o) => o
+            .get("issues")
+            .or_else(|| o.get("data"))
+            .and_then(|d| d.as_array()),
         _ => None,
     };
     match arr {
