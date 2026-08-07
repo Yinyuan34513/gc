@@ -137,6 +137,8 @@ enum RepoAction {
     },
     /// 给仓库点 Star（网页端 v2 接口）
     Star { repo: String },
+    /// 取消仓库 Star（网页端 v2 接口）
+    Unstar { repo: String },
     /// 列出仓库文件树（网页端 v2 接口，类似网页 repo 页面的文件列表）
     Tree(TreeArgs),
     /// 读取单个文件内容（网页端 v2 接口，类似网页 blob 页面）
@@ -434,6 +436,16 @@ pub fn run() -> Result<()> {
                 let token = web_access_token()?;
                 let count = crate::api::star_repo(&token, id)?;
                 println!("已给 {} 点 Star（当前 {} 颗）", repo, count);
+            }
+            RepoAction::Unstar { repo } => {
+                let (o, n) = split_repo(&repo)?;
+                let v = api.repo(&o, &n)?;
+                let id = v["id"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("无法解析仓库 ID（请确认仓库存在且可访问）"))?;
+                let token = web_access_token()?;
+                let count = crate::api::unstar_repo(&token, id)?;
+                println!("已取消 {} 的 Star（当前 {} 颗）", repo, count);
             }
             RepoAction::Tree(a) => run_tree(&a.repo, &a.branch)?,
             RepoAction::Read(a) => run_read(&a.repo, &a.file, &a.branch, a.output.as_deref())?,
