@@ -1235,8 +1235,9 @@ pub fn issue_reopen(token: &str, owner: &str, name: &str, iid: u64) -> Result<Va
 }
 
 /// 回复 Issue（网页端 v2）：POST /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}/notes
-/// body：{"body":"..."}。端点为按 GitLab/GitCode 惯例推断（无抓包确认），若报错请贴出
-/// 网页端「回复」请求的 URL/body 以便校正。
+/// 回复 Issue（网页端 v2）：POST /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}/discussions
+/// body：{"project_id":"owner%2Fname","issue_iid":<iid>,"body":"..."}（逆向自网页「回复」请求）。
+/// 返回 discussion 对象（含 notes 数组；首条 note 的 id 即评论 id）。
 pub fn issue_reply(token: &str, owner: &str, name: &str, iid: u64, body: &str) -> Result<Value> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(
@@ -1247,9 +1248,13 @@ pub fn issue_reply(token: &str, owner: &str, name: &str, iid: u64, body: &str) -
         .context("创建 HTTP 客户端失败")?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
-    let b = serde_json::json!({ "body": body });
+    let b = serde_json::json!({
+        "project_id": path_seg,
+        "issue_iid": iid,
+        "body": body,
+    });
     let url = format!(
-        "{}/issuepr/api/v1/issue/{}/issues/{}/notes",
+        "{}/issuepr/api/v1/issue/{}/issues/{}/discussions",
         web_base().trim_end_matches('/'),
         path_seg,
         iid,

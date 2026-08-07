@@ -667,8 +667,12 @@ pub fn run() -> Result<()> {
                 let (o, n) = split_repo(&repo)?;
                 let token = web_access_token()?;
                 let v = crate::api::issue_reply(&token, &o, &n, issue, &body)?;
-                let note_id = v["id"].as_u64().unwrap_or(0);
-                println!("已回复 Issue #{}（评论 id：{}）", issue, note_id);
+                let discussion_id = v["id"].as_str().unwrap_or("");
+                let note_id = v["notes"]
+                    .get(0)
+                    .and_then(|n0| n0["id"].as_u64())
+                    .unwrap_or(0);
+                println!("已回复 Issue #{}（讨论：{} 评论 id：{}）", issue, discussion_id, note_id);
             }
         },
 
