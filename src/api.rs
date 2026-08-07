@@ -804,6 +804,40 @@ pub fn fork_repo(
     serde_json::from_str::<Value>(&text).context("解析 fork 响应失败")
 }
 
+/// 给仓库点 Star（网页端 v2 接口：POST /api/v2/projects/{id}/star）
+/// 注意：该接口用「数字项目 ID」而非 owner/name，需先通过 v5 接口解析出 id。
+/// 需要浏览器会话 JWT（Bearer）+ 浏览器头。响应体含最新 star_count。
+pub fn star_repo(token: &str, project_id: u64) -> Result<u64> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+        )
+        .build()
+        .context("创建 HTTP 客户端失败")?;
+    let url = format!(
+        "{}/api/v2/projects/{}/star",
+        web_base().trim_end_matches('/'),
+        project_id,
+    );
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Accept", "*/*")
+        .send()
+        .context("请求 GitCode star 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode star 接口错误 {}: {}", status, text));
+    }
+    let v: Value = serde_json::from_str(&text).context("解析 star 响应失败")?;
+    Ok(v["star_count"].as_u64().unwrap_or(0))
+}
+
 /// 刷新网页端 JWT（GET /uc/api/v1/user/oauth/token）
 /// 必须在 Cookie 里同时携带旧的 access 与 refresh，否则服务端会注销会话。
 /// 返回新的 (access, refresh)。token 会同时出现在 JSON body 与 Set-Cookie 中。

@@ -56,6 +56,7 @@ gc repo clone owner/name [dest]                       # 克隆（内部调用 gi
 gc repo clone owner/name --api [--path src] [--ref main] [dest]   # 不用 git，直接走网页端 v2 接口下载整个文件树（--path 只下某子目录）
 gc repo create my-new-repo --description "..." --private   # 在当前用户名下建仓库
 gc repo fork owner/name [--name new-name] [--description "..."]   # Fork 到当前用户命名空间（网页端 v2 接口）
+gc repo star owner/name                                         # 给仓库点 Star（网页端 v2 接口）
 gc repo tree owner/name [--ref main]   # 列出文件树（网页端 v2 接口）
 gc repo read owner/name <file> [--ref main] [--output path]   # 读取文件内容（网页端 v2 接口）
 gc repo download owner/name <file1> <file2> ... [--ref main] [--output dir]   # 多线程流式下载多个文件
