@@ -1,0 +1,49 @@
+本文件用于保留被移植代码的原始版权与许可声明。
+This file preserves the original copyright and license notice of ported code.
+
+===============================================================================
+Upstream project : ohos_gitcode_cli (@oh-gc/cli)
+Upstream homepage: https://gitcode.com/guozejun/ohos_gitcode_cli
+Upstream author  : guozejun <guozejun@huawei.com>
+Upstream license : MIT (declared in package.json: "license": "MIT")
+===============================================================================
+
+gc 的以下能力移植自上述项目（接口路径、请求体字段、参数语义与行为约定）：
+
+  - Pull Request 全生命周期：merge / close / reopen / update、评论增删改查、
+    reviewers / testers、assignees、labels、linked-issues、files、commits、
+    user_reactions、modify_history、option_reviewers、discussions 评论
+  - 分支：list / get / create / delete / protection / 保护规则
+  - 提交：list / get / comments
+  - 文件：contents 的 list / get / raw / create / update / delete
+  - 仓库治理：tag / hook / label / milestone / collaborator / org
+
+移植为 Rust 重写实现，非逐行复制，但接口契约来自上游，故按 MIT 要求保留声明。
+
+说明：上游 git 仓库中未随附 LICENSE 文件（package.json 的 files 字段列出了
+LICENSE，但仓库内不存在该文件）。此处依据其 package.json 声明的
+"license": "MIT" 与 "author": "guozejun" 补全标准 MIT 全文。
+
+-------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) guozejun
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-------------------------------------------------------------------------------

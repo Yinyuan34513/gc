@@ -1,8 +1,50 @@
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::io::Read;
+use std::time::Duration;
+
+/// 网页端接口统一伪装成浏览器 —— 服务端会按 UA 拦请求。
+const WEB_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                      Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0";
+
+fn secs_from_env(key: &str, default: u64) -> Duration {
+    let n = std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default);
+    Duration::from_secs(n)
+}
+
+/// 统一构造 HTTP 客户端。
+///
+/// 必须带超时：不设的话对端不回包就永久挂起。CLI 里还能 Ctrl-C，
+/// 但 `gc mcp start` 挂住就等于 AI 客户端无限等待，没法自愈。
+///
+/// - `GITCODE_CONNECT_TIMEOUT`（秒，默认 10）：连不上就快速失败
+/// - `GITCODE_TIMEOUT`（秒，默认 60）：单次请求总时长上限
+///
+/// 注意总超时会把上传/下载的传输时间也算进去，大文件要按需用
+/// `RequestBuilder::timeout` 单独放宽（见 [`ApiClient::upload_asset`]）。
+pub fn http_client(user_agent: &str) -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent(user_agent.to_string())
+        .connect_timeout(secs_from_env("GITCODE_CONNECT_TIMEOUT", 10))
+        .timeout(secs_from_env("GITCODE_TIMEOUT", 60))
+        .build()
+        .context("创建 HTTP 客户端失败")
+}
+
+/// 网页端（web-api）专用客户端。
+fn web_client() -> Result<reqwest::blocking::Client> {
+    http_client(WEB_UA)
+}
+
+/// 大文件传输的超时上限，可用 `GITCODE_TRANSFER_TIMEOUT` 覆盖（秒，默认 1 小时）。
+fn transfer_timeout() -> Duration {
+    secs_from_env("GITCODE_TRANSFER_TIMEOUT", 3600)
+}
 
 /// 包装一个 Reader，每读出一段就推进进度条（用于上传进度显示）
 struct ProgressReader<R> {
@@ -29,10 +71,7 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base: String, token: Option<String>) -> Result<Self> {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent("gc/0.1 (GitCode CLI)")
-            .build()
-            .context("创建 HTTP 客户端失败")?;
+        let client = http_client("gc/0.1 (GitCode CLI)")?;
         Ok(Self { base, token, client })
     }
 
@@ -80,6 +119,33 @@ impl ApiClient {
         self.request(reqwest::Method::PATCH, path, &[], Some(body))
     }
 
+    pub fn put(&self, path: &str, body: &Value) -> Result<Value> {
+        self.request(reqwest::Method::PUT, path, &[], Some(body))
+    }
+
+    pub fn delete(&self, path: &str) -> Result<Value> {
+        self.request(reqwest::Method::DELETE, path, &[], None)
+    }
+
+    /// 带请求体的 DELETE。v5 的取消关联 issue / 移除评审人等接口都是这种形态。
+    pub fn delete_body(&self, path: &str, body: &Value) -> Result<Value> {
+        self.request(reqwest::Method::DELETE, path, &[], Some(body))
+    }
+
+    /// 分页 GET：`page` / `per_page` 传 0 表示不带该参数，用服务端默认值。
+    fn get_paged(&self, path: &str, page: u64, per_page: u64, extra: &[(&str, &str)]) -> Result<Value> {
+        let p = page.to_string();
+        let pp = per_page.to_string();
+        let mut q: Vec<(&str, &str)> = extra.to_vec();
+        if page > 0 {
+            q.push(("page", &p));
+        }
+        if per_page > 0 {
+            q.push(("per_page", &pp));
+        }
+        self.get(path, &q)
+    }
+
     // ---- 认证 ----
     pub fn authenticated_user(&self) -> Result<Value> {
         self.get("/user", &[])
@@ -115,10 +181,220 @@ impl ApiClient {
         self.patch(&format!("/repos/{}/{}", owner, name), &body)
     }
 
+    /// Fork 仓库（v5 开放 API：POST /repos/{owner}/{repo}/forks）。
+    ///
+    /// 与网页端 v2 的 [`fork_repo`] 相比，这条走 PAT，且支持 `organization`——
+    /// 也就是把仓库 fork 进组织命名空间（v2 接口只能 fork 到当前用户名下）。
+    ///
+    /// 移植自 @oh-gc/cli（作者 guozejun，MIT 许可）src/api/repos.ts 的 forkRepo。
+    /// Copyright (c) guozejun. 详见仓库根目录 LICENSE.oh-gc。
+    pub fn fork_repo_v5(
+        &self,
+        owner: &str,
+        name: &str,
+        organization: Option<&str>,
+        new_name: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<Value> {
+        let mut body = serde_json::Map::new();
+        if let Some(o) = organization {
+            body.insert("organization".into(), Value::String(o.to_string()));
+        }
+        if let Some(n) = new_name {
+            body.insert("name".into(), Value::String(n.to_string()));
+        }
+        if let Some(p) = path {
+            body.insert("path".into(), Value::String(p.to_string()));
+        }
+        self.post(&format!("/repos/{}/{}/forks", owner, name), &Value::Object(body))
+    }
+
     /// 删除仓库（v5 开放 API：DELETE /repos/{owner}/{name}）。危险操作，调用方需先确认。
     /// 成功时响应体为空（返回 Value::Null）。
     pub fn delete_repo(&self, owner: &str, name: &str) -> Result<Value> {
         self.request(reqwest::Method::DELETE, &format!("/repos/{}/{}", owner, name), &[], None)
+    }
+
+    // ---- 仓库设置 / 统计 / 治理 ----
+    // 以下端点移植自 @oh-gc/cli（作者 guozejun，MIT 许可）src/api/repos.ts。
+    // Copyright (c) guozejun. 详见仓库根目录 LICENSE.oh-gc。
+
+    /// 更新仓库属性（PATCH /repos/{owner}/{name}）。
+    /// `body` 可含 name / description / homepage / private / default_branch，部分更新。
+    pub fn update_repo(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.patch(&format!("/repos/{}/{}", owner, name), body)
+    }
+
+    /// 转移仓库归属（POST /repos/{owner}/{name}/transfer）。`team_ids` 为空则不带该字段。
+    pub fn transfer_repo(&self, owner: &str, name: &str, new_owner: &str, team_ids: &[u64]) -> Result<Value> {
+        let mut body = serde_json::Map::new();
+        body.insert("new_owner".into(), Value::String(new_owner.to_string()));
+        if !team_ids.is_empty() {
+            body.insert("team_ids".into(), json!(team_ids));
+        }
+        self.post(&format!("/repos/{}/{}/transfer", owner, name), &Value::Object(body))
+    }
+
+    /// 列出仓库的 fork（GET /repos/{owner}/{name}/forks）。`sort`: newest / oldest / stargazers。
+    pub fn list_forks(&self, owner: &str, name: &str, sort: &str, page: u64, per_page: u64) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !sort.is_empty() {
+            q.push(("sort", sort));
+        }
+        self.get_paged(&format!("/repos/{}/{}/forks", owner, name), page, per_page, &q)
+    }
+
+    /// 读取仓库高级设置（GET /repos/{owner}/{name}/repo_settings）。
+    pub fn repo_settings(&self, owner: &str, name: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/repo_settings", owner, name), &[])
+    }
+
+    /// 更新仓库高级设置（PUT /repos/{owner}/{name}/repo_settings）。
+    ///
+    /// 上游写的是 PATCH，但服务端实测只认 PUT（PATCH 直接 405），下面几个写接口同理。
+    pub fn update_repo_settings(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.put(&format!("/repos/{}/{}/repo_settings", owner, name), body)
+    }
+
+    /// 仓库语言构成（GET /repos/{owner}/{name}/languages），返回 {语言: 字节数}。
+    pub fn repo_languages(&self, owner: &str, name: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/languages", owner, name), &[])
+    }
+
+    /// 贡献者列表（GET /repos/{owner}/{name}/contributors）。`kind`: committers / authors。
+    pub fn repo_contributors(&self, owner: &str, name: &str, kind: &str, page: u64, per_page: u64) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !kind.is_empty() {
+            q.push(("type", kind));
+        }
+        self.get_paged(&format!("/repos/{}/{}/contributors", owner, name), page, per_page, &q)
+    }
+
+    /// 贡献者统计（GET /repos/{owner}/{name}/contributors/statistic）：增删行数、提交数。
+    pub fn contributor_statistics(
+        &self,
+        owner: &str,
+        name: &str,
+        author: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !author.is_empty() {
+            q.push(("author", author));
+        }
+        self.get_paged(&format!("/repos/{}/{}/contributors/statistic", owner, name), page, per_page, &q)
+    }
+
+    /// 提交统计（GET /{owner}/{name}/repository/commit_statistics）。
+    ///
+    /// 注意这条路径没有 `/repos` 前缀，上游就是这么写的，别顺手「修正」。
+    pub fn commit_statistics(
+        &self,
+        owner: &str,
+        name: &str,
+        branch: &str,
+        author: &str,
+        only_self: bool,
+        since: &str,
+        until: &str,
+    ) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![("branch_name", branch)];
+        if !author.is_empty() {
+            q.push(("author", author));
+        }
+        if only_self {
+            q.push(("only_self", "true"));
+        }
+        if !since.is_empty() {
+            q.push(("since", since));
+        }
+        if !until.is_empty() {
+            q.push(("until", until));
+        }
+        self.get(&format!("/{}/{}/repository/commit_statistics", owner, name), &q)
+    }
+
+    /// 下载量统计（GET /repos/{owner}/{name}/download_statistics）。`direction`: asc / desc。
+    pub fn download_statistics(
+        &self,
+        owner: &str,
+        name: &str,
+        start_date: &str,
+        end_date: &str,
+        direction: &str,
+    ) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !start_date.is_empty() {
+            q.push(("start_date", start_date));
+        }
+        if !end_date.is_empty() {
+            q.push(("end_date", end_date));
+        }
+        if !direction.is_empty() {
+            q.push(("direction", direction));
+        }
+        self.get(&format!("/repos/{}/{}/download_statistics", owner, name), &q)
+    }
+
+    /// 仓库动态（GET /repos/{owner}/{name}/events）。
+    /// `filter`: all / push / merged / issue / comments / team / project。
+    #[allow(clippy::too_many_arguments)]
+    pub fn repo_events(
+        &self,
+        owner: &str,
+        name: &str,
+        filter: &str,
+        author: &str,
+        before: &str,
+        after: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !filter.is_empty() {
+            q.push(("filter", filter));
+        }
+        if !author.is_empty() {
+            q.push(("author", author));
+        }
+        if !before.is_empty() {
+            q.push(("before", before));
+        }
+        if !after.is_empty() {
+            q.push(("after", after));
+        }
+        self.get_paged(&format!("/repos/{}/{}/events", owner, name), page, per_page, &q)
+    }
+
+    /// 归档 / 取消归档仓库（PUT /org/{org}/repo/{repo}/status）。
+    /// status=2 归档、0 取消；服务端要求带账号密码二次确认。
+    pub fn archive_repo(&self, org: &str, repo: &str, archived: bool, password: &str) -> Result<Value> {
+        let body = json!({ "status": if archived { 2 } else { 0 }, "password": password });
+        self.put(&format!("/org/{}/repo/{}/status", org, repo), &body)
+    }
+
+    /// 读取仓库权限继承模式（GET /repos/{owner}/{name}/transition）。
+    /// 注意读回来的字段名是 `memberMgntMode`，写进去的字段名却是 `mode`。1 继承、2 独立。
+    pub fn repo_transition(&self, owner: &str, name: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/transition", owner, name), &[])
+    }
+
+    /// 设置仓库权限继承模式（PUT /repos/{owner}/{name}/transition）。
+    pub fn update_repo_transition(&self, owner: &str, name: &str, mode: u8) -> Result<Value> {
+        self.put(&format!("/repos/{}/{}/transition", owner, name), &json!({ "mode": mode }))
+    }
+
+    /// 开关仓库功能模块（PUT /repos/{owner}/{name}/module/setting）。
+    /// `body` 可含 has_wiki / has_issue / has_security / has_merge_request / has_fork /
+    /// has_analysis / has_discussion。成功返回 {"msg":"success","code":1}。
+    pub fn update_module_setting(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.put(&format!("/repos/{}/{}/module/setting", owner, name), body)
+    }
+
+    /// 列出仓库自定义角色（GET /repos/{owner}/{name}/customized_roles）。
+    pub fn customized_roles(&self, owner: &str, name: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/customized_roles", owner, name), &[])
     }
 
     // ---- Issue ----
@@ -150,6 +426,296 @@ impl ApiClient {
             "base": base,
         });
         self.post(&format!("/repos/{}/{}/pulls", owner, name), &b)
+    }
+
+    // ---- Pull Request：全生命周期 ----
+    //
+    // 本段接口契约（路径、请求体字段、参数语义）移植自 @oh-gc/cli
+    // <https://gitcode.com/guozejun/ohos_gitcode_cli>，MIT License，
+    // Copyright (c) guozejun。完整版权声明见仓库根目录 LICENSE.oh-gc。
+    //
+    // 几处反直觉的地方（照抄上游实测结论，别"顺手改成 RESTful"）：
+    // - 合并是 PUT 不是 POST；
+    // - 标签、关联 issue 的请求体是**裸数组**，不是 {"labels": [...]} 这种包装；
+    // - 评审人 / 测试人 / 指派人用逗号分隔的**字符串**，不是数组；
+    // - 单条评论的路径是 /pulls/comments/{id}（没有 PR 编号），
+    //   而评论的历史与表情却在 /pulls/comment/{id}/...（单数 comment）。
+
+    fn pull_path(owner: &str, name: &str, num: u64) -> String {
+        format!("/repos/{}/{}/pulls/{}", owner, name, num)
+    }
+
+    /// 合并 PR。`method` 取 merge / squash / rebase，空串表示用服务端默认。
+    pub fn merge_pull(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        method: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<Value> {
+        let mut b = json!({});
+        if !method.is_empty() {
+            b["merge_method"] = json!(method);
+        }
+        if !title.is_empty() {
+            b["title"] = json!(title);
+        }
+        if !description.is_empty() {
+            b["description"] = json!(description);
+        }
+        self.put(&format!("{}/merge", Self::pull_path(owner, name, num)), &b)
+    }
+
+    /// 局部更新 PR：`body` 里只放要改的字段（title / body / state / labels / draft
+    /// / milestone_number）。
+    pub fn update_pull(&self, owner: &str, name: &str, num: u64, body: &Value) -> Result<Value> {
+        self.patch(&Self::pull_path(owner, name, num), body)
+    }
+
+    pub fn close_pull(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
+        self.update_pull(owner, name, num, &json!({ "state": "closed" }))
+    }
+
+    pub fn reopen_pull(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
+        self.update_pull(owner, name, num, &json!({ "state": "open" }))
+    }
+
+    /// PR 改动的文件列表（含 patch 文本）。
+    pub fn pull_files(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
+        self.get(&format!("{}/files", Self::pull_path(owner, name, num)), &[])
+    }
+
+    pub fn pull_commits(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("{}/commits", Self::pull_path(owner, name, num)), page, per_page, &[])
+    }
+
+    pub fn pull_comments(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("{}/comments", Self::pull_path(owner, name, num)), page, per_page, &[])
+    }
+
+    /// 发表 PR 评论。给了 `path` + `position` 就是行级评论，否则是整体评论。
+    pub fn create_pull_comment(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        body: &str,
+        path: Option<&str>,
+        position: Option<u64>,
+    ) -> Result<Value> {
+        let mut b = json!({ "body": body });
+        if let Some(p) = path {
+            b["path"] = json!(p);
+        }
+        if let Some(p) = position {
+            b["position"] = json!(p);
+        }
+        self.post(&format!("{}/comments", Self::pull_path(owner, name, num)), &b)
+    }
+
+    /// 单条评论用的是不带 PR 编号的路径。
+    fn comment_path(owner: &str, name: &str, id: u64) -> String {
+        format!("/repos/{}/{}/pulls/comments/{}", owner, name, id)
+    }
+
+    pub fn pull_comment(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
+        self.get(&Self::comment_path(owner, name, id), &[])
+    }
+
+    pub fn edit_pull_comment(&self, owner: &str, name: &str, id: u64, body: &str) -> Result<Value> {
+        self.patch(&Self::comment_path(owner, name, id), &json!({ "body": body }))
+    }
+
+    pub fn delete_pull_comment(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
+        self.delete(&Self::comment_path(owner, name, id))
+    }
+
+    /// 评论的编辑历史。注意路径是单数 `comment`，和上面的 `comments` 不是一回事。
+    pub fn pull_comment_history(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/pulls/comment/{}/modify_history", owner, name, id), &[])
+    }
+
+    pub fn pull_comment_reactions(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/pulls/comment/{}/user_reactions", owner, name, id), &[])
+    }
+
+    /// 在某条讨论线程下回复。
+    pub fn reply_pull_discussion(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        discussion_id: &str,
+        body: &str,
+    ) -> Result<Value> {
+        self.post(
+            &format!(
+                "{}/discussions/{}/comments",
+                Self::pull_path(owner, name, num),
+                enc(discussion_id)
+            ),
+            &json!({ "body": body }),
+        )
+    }
+
+    /// 标记讨论线程已解决 / 未解决。
+    pub fn resolve_pull_discussion(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        discussion_id: &str,
+        resolved: bool,
+    ) -> Result<Value> {
+        self.put(
+            &format!("{}/comments/{}", Self::pull_path(owner, name, num), enc(discussion_id)),
+            &json!({ "resolved": resolved }),
+        )
+    }
+
+    /// 添加评审人。`reviewers` 是逗号分隔的用户名；`append=false` 会覆盖现有评审人。
+    pub fn assign_pull_reviewers(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        reviewers: &str,
+        append: bool,
+    ) -> Result<Value> {
+        self.post(
+            &format!("{}/reviewers", Self::pull_path(owner, name, num)),
+            &json!({ "reviewers": reviewers, "add": append }),
+        )
+    }
+
+    pub fn remove_pull_reviewers(&self, owner: &str, name: &str, num: u64, reviewers: &str) -> Result<Value> {
+        self.delete_body(
+            &format!("{}/reviewers", Self::pull_path(owner, name, num)),
+            &json!({ "reviewers": reviewers }),
+        )
+    }
+
+    pub fn assign_pull_testers(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        testers: &str,
+        append: bool,
+    ) -> Result<Value> {
+        self.post(
+            &format!("{}/testers", Self::pull_path(owner, name, num)),
+            &json!({ "testers": testers, "add": append }),
+        )
+    }
+
+    pub fn remove_pull_testers(&self, owner: &str, name: &str, num: u64, testers: &str) -> Result<Value> {
+        self.delete_body(
+            &format!("{}/testers", Self::pull_path(owner, name, num)),
+            &json!({ "testers": testers }),
+        )
+    }
+
+    /// 可选评审人（候选列表）。
+    pub fn pull_option_reviewers(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
+        self.get(&format!("{}/option_reviewers", Self::pull_path(owner, name, num)), &[])
+    }
+
+    /// 提交评审通过。`force` 用于绕过未满足的评审条件。
+    pub fn review_pull(&self, owner: &str, name: &str, num: u64, force: bool) -> Result<Value> {
+        self.post(
+            &format!("{}/review", Self::pull_path(owner, name, num)),
+            &json!({ "force": force }),
+        )
+    }
+
+    /// 提交测试通过。
+    pub fn test_pull(&self, owner: &str, name: &str, num: u64, force: bool) -> Result<Value> {
+        self.post(
+            &format!("{}/test", Self::pull_path(owner, name, num)),
+            &json!({ "force": force }),
+        )
+    }
+
+    /// 追加标签。请求体是裸数组。
+    pub fn add_pull_labels(&self, owner: &str, name: &str, num: u64, labels: &[String]) -> Result<Value> {
+        self.post(&format!("{}/labels", Self::pull_path(owner, name, num)), &json!(labels))
+    }
+
+    /// 覆盖标签（PUT 语义：传什么就只剩什么）。
+    pub fn replace_pull_labels(&self, owner: &str, name: &str, num: u64, labels: &[String]) -> Result<Value> {
+        self.put(&format!("{}/labels", Self::pull_path(owner, name, num)), &json!(labels))
+    }
+
+    /// 移除标签。`names` 是逗号分隔的标签名，放在路径里。
+    pub fn remove_pull_labels(&self, owner: &str, name: &str, num: u64, names: &str) -> Result<Value> {
+        self.delete(&format!("{}/labels/{}", Self::pull_path(owner, name, num), enc(names)))
+    }
+
+    pub fn pull_linked_issues(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("{}/issues", Self::pull_path(owner, name, num)), page, per_page, &[])
+    }
+
+    /// 关联 issue。请求体是裸数组。
+    pub fn link_pull_issues(&self, owner: &str, name: &str, num: u64, issues: &[u64]) -> Result<Value> {
+        self.post(&format!("{}/issues", Self::pull_path(owner, name, num)), &json!(issues))
+    }
+
+    pub fn unlink_pull_issues(&self, owner: &str, name: &str, num: u64, issues: &[u64]) -> Result<Value> {
+        self.delete_body(&format!("{}/issues", Self::pull_path(owner, name, num)), &json!(issues))
+    }
+
+    /// 指派负责人。`assignees` 是逗号分隔的用户名。
+    pub fn assign_pull_assignees(&self, owner: &str, name: &str, num: u64, assignees: &str) -> Result<Value> {
+        self.post(
+            &format!("{}/assignees", Self::pull_path(owner, name, num)),
+            &json!({ "assignees": assignees }),
+        )
+    }
+
+    /// 重置指派状态；`reset_all=true` 清空全部。
+    pub fn reset_pull_assignees(&self, owner: &str, name: &str, num: u64, reset_all: bool) -> Result<Value> {
+        let b = if reset_all { json!({ "reset_all": true }) } else { json!({}) };
+        self.patch(&format!("{}/assignees", Self::pull_path(owner, name, num)), &b)
+    }
+
+    /// 移除指派人；`assignees` 为空表示移除全部。
+    pub fn remove_pull_assignees(&self, owner: &str, name: &str, num: u64, assignees: &str) -> Result<Value> {
+        let path = format!("{}/assignees", Self::pull_path(owner, name, num));
+        if assignees.is_empty() {
+            self.delete(&path)
+        } else {
+            self.delete_body(&path, &json!({ "assignees": assignees }))
+        }
+    }
+
+    pub fn pull_reactions(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
+        self.get(&format!("{}/user_reactions", Self::pull_path(owner, name, num)), &[])
+    }
+
+    pub fn create_pull_reaction(&self, owner: &str, name: &str, num: u64, content: &str) -> Result<Value> {
+        self.post(
+            &format!("{}/user_reactions", Self::pull_path(owner, name, num)),
+            &json!({ "content": content }),
+        )
+    }
+
+    pub fn pull_modify_history(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
+        self.get(&format!("{}/modify_history", Self::pull_path(owner, name, num)), &[])
+    }
+
+    pub fn pull_operate_logs(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("{}/operate_logs", Self::pull_path(owner, name, num)), page, per_page, &[])
+    }
+
+    pub fn pull_settings(&self, owner: &str, name: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/pull_request_settings", owner, name), &[])
+    }
+
+    pub fn update_pull_settings(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.put(&format!("/repos/{}/{}/pull_request_settings", owner, name), body)
     }
 
     // ---- 发行版 ----
@@ -227,6 +793,9 @@ impl ApiClient {
             .client
             .post(&url)
             .multipart(form)
+            // 客户端默认那 60 秒是给普通接口的，大文件传输得单独放宽，
+            // 否则一上传就被自己的超时掐断。
+            .timeout(transfer_timeout())
             .send()
             .context("上传附件失败")?;
         bar.finish_with_message("上传完成");
@@ -236,6 +805,644 @@ impl ApiClient {
             return Err(anyhow!("上传失败 {}: {}", status, text));
         }
         serde_json::from_str(&text).context("解析上传响应失败")
+    }
+
+    // ---- 分支 / 提交 / 文件 ----
+    //
+    // 本段接口契约移植自 @oh-gc/cli
+    // <https://gitcode.com/guozejun/ohos_gitcode_cli>，MIT License，
+    // Copyright (c) guozejun。完整版权声明见仓库根目录 LICENSE.oh-gc。
+
+    /// 返回纯文本响应（diff / patch / raw 文件用），不做 JSON 解析。
+    fn request_text(&self, path: &str, extra_q: &[(&str, &str)]) -> Result<String> {
+        let url = format!("{}{}", self.base, path);
+        let token = self.token.as_deref().unwrap_or("");
+        let mut builder = self
+            .client
+            .get(&url)
+            .query(&[("access_token", token)])
+            .header("Accept", "text/plain");
+        if !extra_q.is_empty() {
+            builder = builder.query(extra_q);
+        }
+        let resp = builder.send().context("请求 GitCode API 失败")?;
+        let status = resp.status();
+        let text = resp.text().context("读取响应体失败")?;
+        if !status.is_success() {
+            return Err(anyhow!("GitCode API 错误 {}: {}", status, text));
+        }
+        Ok(text)
+    }
+
+    // -- 分支 --
+
+    pub fn branches(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/branches", owner, name), page, per_page, &[])
+    }
+
+    pub fn branch(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/branches/{}", owner, name, enc(branch)), &[])
+    }
+
+    /// 建分支。`refs` 是起点（分支名 / 标签 / commit SHA）。
+    pub fn create_branch(&self, owner: &str, name: &str, refs: &str, branch_name: &str) -> Result<Value> {
+        self.post(
+            &format!("/repos/{}/{}/branches", owner, name),
+            &json!({ "refs": refs, "branch_name": branch_name }),
+        )
+    }
+
+    pub fn delete_branch(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/branches/{}", owner, name, enc(branch)))
+    }
+
+    /// 开启分支保护。`body` 里放 pusher / merger 等策略字段。
+    pub fn protect_branch(&self, owner: &str, name: &str, branch: &str, body: &Value) -> Result<Value> {
+        self.put(
+            &format!("/repos/{}/{}/branches/{}/protection", owner, name, enc(branch)),
+            body,
+        )
+    }
+
+    pub fn unprotect_branch(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/branches/{}/protection", owner, name, enc(branch)))
+    }
+
+    /// 读取单分支的保护配置（用于硬重置后尽量恢复原样）。分支未受保护时返回错误。
+    pub fn branch_protection(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/branches/{}/protection", owner, name, enc(branch)), &[])
+    }
+
+    /// 硬重置分支到指定 SHA：删除后按 SHA 重建。
+    ///
+    /// 若分支受保护导致删除失败，自动解除保护再删、重建，并尽量恢复原有保护规则
+    /// （恢复失败仅打印告警，不中断整体流程——避免把分支留在「未保护」状态却不提示）。
+    /// 这把 `repo sync --force` 与 `repo fork --force` 的「删+建」逻辑统一收口到这里。
+    pub fn hard_reset_branch(&self, owner: &str, name: &str, branch: &str, sha: &str) -> Result<Value> {
+        // 解保护后要还原的策略；None 表示原本就没保护（或没读到），重建后不用管
+        let mut restore: Option<Value> = None;
+
+        // 分支存在才需要删；拿不到（404 等）就直接走创建
+        if self.branch(owner, name, branch).is_ok() {
+            if let Err(e) = self.delete_branch(owner, name, branch) {
+                // 删除失败多半是分支受保护。先抓原策略，解保护后重试删除。
+                let saved = self.branch_protection(owner, name, branch).ok();
+                self.unprotect_branch(owner, name, branch)
+                    .map_err(|ue| anyhow!("删除分支 {} 失败（{}），自动解除保护也失败：{}", branch, e, ue))?;
+                restore = Some(saved.as_ref().map_or_else(|| json!({}), protect_body_from));
+                self.delete_branch(owner, name, branch).map_err(|de| {
+                    anyhow!("已解除分支 {} 的保护但删除仍失败：{}（原保护规则未恢复，请到网页端检查）", branch, de)
+                })?;
+            }
+        }
+
+        let created = self.create_branch(owner, name, sha, branch)?;
+
+        // 分支重建后才能重新挂保护规则；失败只告警，避免静默把分支留在未保护状态
+        if let Some(cfg) = restore {
+            if let Err(re) = self.protect_branch(owner, name, branch, &cfg) {
+                eprintln!(
+                    "⚠ 已硬重置分支 {}，但未能自动恢复其保护规则：{}（请到网页端检查）",
+                    branch, re
+                );
+            }
+        }
+        Ok(created)
+    }
+
+    /// 列出通配符保护规则（和单分支保护是两套东西）。
+    pub fn branch_protect_rules(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/protect_branches", owner, name), page, per_page, &[])
+    }
+
+    /// 新建通配符保护规则。注意是 PUT 到一个固定的 `.../setting/new` 路径。
+    pub fn create_branch_protect_rule(
+        &self,
+        owner: &str,
+        name: &str,
+        wildcard: &str,
+        pusher: &str,
+        merger: &str,
+    ) -> Result<Value> {
+        self.put(
+            &format!("/repos/{}/{}/branches/setting/new", owner, name),
+            &json!({ "wildcard": wildcard, "pusher": pusher, "merger": merger }),
+        )
+    }
+
+    pub fn update_branch_protect_rule(
+        &self,
+        owner: &str,
+        name: &str,
+        wildcard: &str,
+        pusher: &str,
+        merger: &str,
+    ) -> Result<Value> {
+        let mut b = json!({});
+        if !pusher.is_empty() {
+            b["pusher"] = json!(pusher);
+        }
+        if !merger.is_empty() {
+            b["merger"] = json!(merger);
+        }
+        self.put(
+            &format!("/repos/{}/{}/branches/{}/setting", owner, name, enc(wildcard)),
+            &b,
+        )
+    }
+
+    pub fn delete_branch_protect_rule(&self, owner: &str, name: &str, wildcard: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/branches/{}/setting", owner, name, enc(wildcard)))
+    }
+
+    // -- 提交 --
+
+    /// 提交列表。`filters` 可放 sha / path / author / since / until。
+    pub fn commits(
+        &self,
+        owner: &str,
+        name: &str,
+        filters: &[(&str, &str)],
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/commits", owner, name), page, per_page, filters)
+    }
+
+    pub fn commit(&self, owner: &str, name: &str, sha: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/commits/{}", owner, name, enc(sha)), &[])
+    }
+
+    /// 提交的 diff 文本。路径是单数 `commit`，和上面的 `commits` 不是一回事。
+    pub fn commit_diff(&self, owner: &str, name: &str, sha: &str) -> Result<String> {
+        self.request_text(&format!("/repos/{}/{}/commit/{}/diff", owner, name, enc(sha)), &[])
+    }
+
+    pub fn commit_patch(&self, owner: &str, name: &str, sha: &str) -> Result<String> {
+        self.request_text(&format!("/repos/{}/{}/commit/{}/patch", owner, name, enc(sha)), &[])
+    }
+
+    pub fn commit_comments(&self, owner: &str, name: &str, r#ref: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(
+            &format!("/repos/{}/{}/commits/{}/comments", owner, name, enc(r#ref)),
+            page,
+            per_page,
+            &[],
+        )
+    }
+
+    pub fn create_commit_comment(&self, owner: &str, name: &str, sha: &str, body: &str) -> Result<Value> {
+        self.post(
+            &format!("/repos/{}/{}/commits/{}/comments", owner, name, enc(sha)),
+            &json!({ "body": body }),
+        )
+    }
+
+    /// 对比两个引用。v5 把范围塞在路径里：`compare/{base}...{head}`。
+    pub fn compare_commits(&self, owner: &str, name: &str, base: &str, head: &str) -> Result<Value> {
+        self.get(
+            &format!("/repos/{}/{}/compare/{}...{}", owner, name, enc(base), enc(head)),
+            &[],
+        )
+    }
+
+    // -- 文件（contents）--
+    //
+    // 与网页端的 repo_file_content 不同：这套走 v5 + PAT，能写（增删改），
+    // 但读大文件不如网页端接口稳。读用哪个都行，写只能用这套。
+
+    fn contents_path(owner: &str, name: &str, path: &str) -> String {
+        format!("/repos/{}/{}/contents/{}", owner, name, enc_path(path))
+    }
+
+    /// 读文件或列目录：路径指向文件就返回文件对象（content 为 base64），
+    /// 指向目录就返回条目数组。
+    pub fn contents(&self, owner: &str, name: &str, path: &str, r#ref: &str) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if r#ref.is_empty() { vec![] } else { vec![("ref", r#ref)] };
+        self.get(&Self::contents_path(owner, name, path), &q)
+    }
+
+    /// 直接取文件原文（不经 base64）。
+    pub fn raw_file(&self, owner: &str, name: &str, path: &str, r#ref: &str) -> Result<String> {
+        let q: Vec<(&str, &str)> = if r#ref.is_empty() { vec![] } else { vec![("ref", r#ref)] };
+        self.request_text(
+            &format!("/repos/{}/{}/raw/{}", owner, name, enc_path(path)),
+            &q,
+        )
+    }
+
+    /// 新建文件。`content` 必须是 base64。
+    pub fn create_file(
+        &self,
+        owner: &str,
+        name: &str,
+        path: &str,
+        message: &str,
+        content_b64: &str,
+        branch: &str,
+    ) -> Result<Value> {
+        let mut b = json!({ "message": message, "content": content_b64 });
+        if !branch.is_empty() {
+            b["branch"] = json!(branch);
+        }
+        self.put(&Self::contents_path(owner, name, path), &b)
+    }
+
+    /// 覆盖已有文件。`sha` 是该文件的当前 blob sha（用 `contents` 查），
+    /// 服务端靠它做乐观锁——传错会 409，别猜。
+    pub fn update_file(
+        &self,
+        owner: &str,
+        name: &str,
+        path: &str,
+        message: &str,
+        content_b64: &str,
+        sha: &str,
+        branch: &str,
+    ) -> Result<Value> {
+        let mut b = json!({ "message": message, "content": content_b64, "sha": sha });
+        if !branch.is_empty() {
+            b["branch"] = json!(branch);
+        }
+        self.put(&Self::contents_path(owner, name, path), &b)
+    }
+
+    pub fn delete_file(
+        &self,
+        owner: &str,
+        name: &str,
+        path: &str,
+        message: &str,
+        sha: &str,
+        branch: &str,
+    ) -> Result<Value> {
+        let mut b = json!({ "message": message, "sha": sha });
+        if !branch.is_empty() {
+            b["branch"] = json!(branch);
+        }
+        self.delete_body(&Self::contents_path(owner, name, path), &b)
+    }
+
+    // ---- 仓库治理：tag / hook / label / milestone / collaborator / org ----
+    //
+    // 本段接口契约移植自 @oh-gc/cli
+    // <https://gitcode.com/guozejun/ohos_gitcode_cli>，MIT License，
+    // Copyright (c) guozejun。完整版权声明见仓库根目录 LICENSE.oh-gc。
+
+    // -- 标签 --
+    pub fn list_tags(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/tags", owner, name), page, per_page, &[])
+    }
+
+    pub fn get_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/tags/{}", owner, name, enc(tag)), &[])
+    }
+
+    /// 新建标签。`tag_name` 是新标签名，`refs` 是起点（SHA / 分支 / 已有标签）。
+    pub fn create_tag(&self, owner: &str, name: &str, refs: &str, tag_name: &str, message: &str) -> Result<Value> {
+        let mut b = json!({ "refs": refs, "tag_name": tag_name });
+        if !message.is_empty() {
+            b["tag_message"] = json!(message);
+        }
+        self.post(&format!("/repos/{}/{}/tags", owner, name), &b)
+    }
+
+    pub fn delete_tag(&self, owner: &str, name: &str, tag_name: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/tags/{}", owner, name, enc(tag_name)))
+    }
+
+    /// 把某个标签设为受保护（只能删保护规则，不能删标签本身）。
+    pub fn protect_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
+        self.put(&format!("/repos/{}/{}/tags/{}/protection", owner, name, enc(tag)), &json!({}))
+    }
+
+    pub fn unprotect_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/tags/{}/protection", owner, name, enc(tag)))
+    }
+
+    pub fn list_protected_tags(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/protected_tags", owner, name), page, per_page, &[])
+    }
+
+    pub fn get_protected_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/protected_tags/{}", owner, name, enc(tag)), &[])
+    }
+
+    /// 新建受保护标签规则。`access_level` 为 0 表示不指定级别。
+    pub fn create_protected_tag(&self, owner: &str, name: &str, tag: &str, access_level: u64) -> Result<Value> {
+        let mut b = json!({ "name": tag });
+        if access_level > 0 {
+            b["create_access_level"] = json!(access_level);
+        }
+        self.post(&format!("/repos/{}/{}/protected_tags", owner, name), &b)
+    }
+
+    pub fn update_protected_tag(&self, owner: &str, name: &str, tag: &str, access_level: u64) -> Result<Value> {
+        self.put(
+            &format!("/repos/{}/{}/protected_tags", owner, name),
+            &json!({ "name": tag, "create_access_level": access_level }),
+        )
+    }
+
+    pub fn delete_protected_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/protected_tags/{}", owner, name, enc(tag)))
+    }
+
+    // -- Webhook --
+    pub fn list_hooks(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/hooks", owner, name), page, per_page, &[])
+    }
+
+    pub fn get_hook(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/hooks/{}", owner, name, id), &[])
+    }
+
+    /// `body` 形如 {"name":..,"config":{"url":..,"content_type":..,"secret":..},"events":[..],"active":..}
+    pub fn create_hook(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.post(&format!("/repos/{}/{}/hooks", owner, name), body)
+    }
+
+    pub fn update_hook(&self, owner: &str, name: &str, id: u64, body: &Value) -> Result<Value> {
+        self.patch(&format!("/repos/{}/{}/hooks/{}", owner, name, id), body)
+    }
+
+    pub fn delete_hook(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/hooks/{}", owner, name, id))
+    }
+
+    // -- 标签（issue/PR 用的 label）--
+    pub fn list_labels(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/repos/{}/{}/labels", owner, name), page, per_page, &[])
+    }
+
+    pub fn get_label(&self, owner: &str, name: &str, label: &str) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/labels/{}", owner, name, enc(label)), &[])
+    }
+
+    /// `body`: {"name":..,"color":..,"description":..}
+    pub fn create_label(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.post(&format!("/repos/{}/{}/labels", owner, name), body)
+    }
+
+    pub fn update_label(&self, owner: &str, name: &str, label: &str, body: &Value) -> Result<Value> {
+        self.patch(&format!("/repos/{}/{}/labels/{}", owner, name, enc(label)), body)
+    }
+
+    pub fn delete_label(&self, owner: &str, name: &str, label: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/labels/{}", owner, name, enc(label)))
+    }
+
+    // -- 里程碑 --
+    pub fn list_milestones(&self, owner: &str, name: &str, state: &str, page: u64, per_page: u64) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if state.is_empty() { vec![] } else { vec![("state", state)] };
+        self.get_paged(&format!("/repos/{}/{}/milestones", owner, name), page, per_page, &q)
+    }
+
+    pub fn get_milestone(&self, owner: &str, name: &str, number: u64) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/milestones/{}", owner, name, number), &[])
+    }
+
+    /// `body`: {"title":..,"state":..,"description":..,"due_on":..}
+    pub fn create_milestone(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
+        self.post(&format!("/repos/{}/{}/milestones", owner, name), body)
+    }
+
+    pub fn update_milestone(&self, owner: &str, name: &str, number: u64, body: &Value) -> Result<Value> {
+        self.patch(&format!("/repos/{}/{}/milestones/{}", owner, name, number), body)
+    }
+
+    pub fn delete_milestone(&self, owner: &str, name: &str, number: u64) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/milestones/{}", owner, name, number))
+    }
+
+    // -- 协作者 --
+    pub fn list_collaborators(&self, owner: &str, name: &str, affiliation: &str, page: u64, per_page: u64) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if affiliation.is_empty() {
+            vec![]
+        } else {
+            vec![("affiliation", affiliation)]
+        };
+        self.get_paged(&format!("/repos/{}/{}/collaborators", owner, name), page, per_page, &q)
+    }
+
+    /// `permission` 为 "" 时不传级别。
+    pub fn add_collaborator(&self, owner: &str, name: &str, username: &str, permission: &str) -> Result<Value> {
+        let mut b = json!({});
+        if !permission.is_empty() {
+            b["permission"] = json!(permission);
+        }
+        self.put(
+            &format!("/repos/{}/{}/collaborators/{}", owner, name, enc(username)),
+            &b,
+        )
+    }
+
+    pub fn remove_collaborator(&self, owner: &str, name: &str, username: &str) -> Result<Value> {
+        self.delete(&format!("/repos/{}/{}/collaborators/{}", owner, name, enc(username)))
+    }
+
+    pub fn collaborator_permission(&self, owner: &str, name: &str, username: &str) -> Result<Value> {
+        self.get(
+            &format!("/repos/{}/{}/collaborators/{}/permission", owner, name, enc(username)),
+            &[],
+        )
+    }
+
+    // -- 组织 --
+    pub fn list_orgs(&self, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged("/user/orgs", page, per_page, &[])
+    }
+
+    pub fn get_org(&self, org: &str) -> Result<Value> {
+        self.get(&format!("/orgs/{}", enc(org)), &[])
+    }
+
+    pub fn list_org_members(&self, org: &str, role: &str, page: u64, per_page: u64) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if role.is_empty() { vec![] } else { vec![("role", role)] };
+        self.get_paged(&format!("/orgs/{}/members", enc(org)), page, per_page, &q)
+    }
+
+    pub fn list_org_repos(&self, org: &str, r#type: &str, page: u64, per_page: u64) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if r#type.is_empty() { vec![] } else { vec![("type", r#type)] };
+        self.get_paged(&format!("/orgs/{}/repos", enc(org)), page, per_page, &q)
+    }
+
+    // ---- 用户（v5）：移植自 @oh-gc/cli（MIT, Copyright (c) guozejun），版权声明见 LICENSE.oh-gc。
+    // 注意：本段走 v5 + PAT（与网页端 v1 的 `User` 命令不是同一套接口）。
+
+    pub fn user_followers(&self, username: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/users/{}/followers", enc(username)), page, per_page, &[])
+    }
+
+    pub fn user_following(&self, username: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/users/{}/following", enc(username)), page, per_page, &[])
+    }
+
+    /// `username` 为空时查「我 Star 的仓库」，否则查指定用户的。
+    pub fn user_starred(&self, username: &str, sort: &str, direction: &str, page: u64, per_page: u64) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !sort.is_empty() {
+            q.push(("sort", sort));
+        }
+        if !direction.is_empty() {
+            q.push(("direction", direction));
+        }
+        if username.is_empty() {
+            self.get_paged("/user/starred", page, per_page, &q)
+        } else {
+            self.get_paged(&format!("/users/{}/starred", enc(username)), page, per_page, &q)
+        }
+    }
+
+    /// 与 `user_starred` 同理，区分「我订阅的」与「某人订阅的」。
+    pub fn user_subscriptions(&self, username: &str, sort: &str, direction: &str, page: u64, per_page: u64) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !sort.is_empty() {
+            q.push(("sort", sort));
+        }
+        if !direction.is_empty() {
+            q.push(("direction", direction));
+        }
+        if username.is_empty() {
+            self.get_paged("/user/subscriptions", page, per_page, &q)
+        } else {
+            self.get_paged(&format!("/users/{}/subscriptions", enc(username)), page, per_page, &q)
+        }
+    }
+
+    pub fn user_namespaces(&self, mode: &str, page: u64, per_page: u64) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if mode.is_empty() { vec![] } else { vec![("mode", mode)] };
+        self.get_paged("/user/namespaces", page, per_page, &q)
+    }
+
+    pub fn user_namespace(&self, path: &str) -> Result<Value> {
+        self.get("/user/namespace", &[("path", path)])
+    }
+
+    pub fn user_keys(&self, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged("/user/keys", page, per_page, &[])
+    }
+
+    pub fn user_key(&self, id: u64) -> Result<Value> {
+        self.get(&format!("/user/keys/{}", id), &[])
+    }
+
+    /// 添加 SSH 公钥。`key` 是完整的公钥字符串（含类型与内容）。
+    pub fn add_user_key(&self, title: &str, key: &str) -> Result<Value> {
+        self.post("/user/keys", &json!({ "title": title, "key": key }))
+    }
+
+    pub fn delete_user_key(&self, id: u64) -> Result<Value> {
+        self.delete(&format!("/user/keys/{}", id))
+    }
+
+    pub fn user_issues(
+        &self,
+        filter: &str,
+        state: &str,
+        labels: &str,
+        sort: &str,
+        direction: &str,
+        since: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !filter.is_empty() {
+            q.push(("filter", filter));
+        }
+        if !state.is_empty() {
+            q.push(("state", state));
+        }
+        if !labels.is_empty() {
+            q.push(("labels", labels));
+        }
+        if !sort.is_empty() {
+            q.push(("sort", sort));
+        }
+        if !direction.is_empty() {
+            q.push(("direction", direction));
+        }
+        if !since.is_empty() {
+            q.push(("since", since));
+        }
+        self.get_paged("/user/issues", page, per_page, &q)
+    }
+
+    pub fn user_prs(
+        &self,
+        state: &str,
+        scope: &str,
+        sort: &str,
+        direction: &str,
+        labels: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !state.is_empty() {
+            q.push(("state", state));
+        }
+        if !scope.is_empty() {
+            q.push(("scope", scope));
+        }
+        if !sort.is_empty() {
+            q.push(("sort", sort));
+        }
+        if !direction.is_empty() {
+            q.push(("direction", direction));
+        }
+        if !labels.is_empty() {
+            q.push(("labels", labels));
+        }
+        self.get_paged("/user/pulls", page, per_page, &q)
+    }
+
+    pub fn org_membership(&self, org: &str) -> Result<Value> {
+        self.get(&format!("/user/memberships/orgs/{}", enc(org)), &[])
+    }
+
+    pub fn leave_org(&self, org: &str) -> Result<Value> {
+        self.delete(&format!("/user/memberships/orgs/{}", enc(org)))
+    }
+
+    // ---- 用户（v5）补充：Tier B 剩余端点 ----
+    // 以下三个移植自 @oh-gc/cli（MIT, Copyright (c) guozejun），版权声明见 LICENSE.oh-gc。
+
+    /// 查看指定用户的资料（v5）。与网页端 v1 的 `User::View` 不是同一接口。
+    pub fn get_user(&self, username: &str) -> Result<Value> {
+        self.get(&format!("/users/{}", enc(username)), &[])
+    }
+
+    /// 更新当前用户资料。`body` 里的字段都可省略（只传要改的）。
+    /// 上游收：nickname / company / description / email / github_account / website / location / avatar。
+    pub fn update_user(&self, body: &Value) -> Result<Value> {
+        self.put("/user", body)
+    }
+
+    /// 查看用户动态（events）。返回按日期分组的事件对象；`year`/`next` 用于翻页。
+    pub fn user_events(&self, username: &str, year: &str, next: &str) -> Result<Value> {
+        let mut q: Vec<(&str, &str)> = vec![];
+        if !year.is_empty() {
+            q.push(("year", year));
+        }
+        if !next.is_empty() {
+            q.push(("next", next));
+        }
+        self.get(&format!("/users/{}/events", enc(username)), &q)
+    }
+
+    // ---- 用户（v5）补充：email 与按用户列组织 ----
+    // 以下两个移植自 @oh-gc/cli（MIT, Copyright (c) guozejun），版权声明见 LICENSE.oh-gc。
+
+    /// 列出当前用户的邮箱地址。
+    pub fn user_emails(&self) -> Result<Value> {
+        self.get("/emails", &[])
+    }
+
+    /// 列出指定用户所属的组织（区别于 `list_orgs` 的「我自己所属」）。
+    pub fn user_orgs_by_username(&self, username: &str, page: u64, per_page: u64) -> Result<Value> {
+        self.get_paged(&format!("/users/{}/orgs", enc(username)), page, per_page, &[])
     }
 
     // ---- 搜索 ----
@@ -264,10 +1471,142 @@ fn enc(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 
+/// 对仓库内路径做编码，但保留 `/` 作为层级分隔符。
+///
+/// `contents/{path}` 里的斜杠是路径结构的一部分，整串用 [`enc`] 会把它编成
+/// `%2F`，服务端就只能看到一个名字里带斜杠的文件，必然 404。
+fn enc_path(s: &str) -> String {
+    s.split('/').map(enc).collect::<Vec<_>>().join("/")
+}
+
+/// 把「读取分支保护」的响应挑成「设置分支保护」能接受的请求体。
+///
+/// GET 返回的字段比 PUT 能收的多得多（wildcard、时间戳、嵌套对象等），
+/// 原样回灌会被服务端拒；PUT 实际只认 pusher / merger 两个策略字符串。
+fn protect_body_from(saved: &Value) -> Value {
+    let mut b = serde_json::Map::new();
+    for k in ["pusher", "merger"] {
+        if let Some(v) = saved.get(k).and_then(Value::as_str) {
+            b.insert(k.to_string(), Value::String(v.to_string()));
+        }
+    }
+    Value::Object(b)
+}
+
 /// 讨论接口基址，可用 GITCODE_WEB_BASE 覆盖（默认网页端）
 pub fn web_base() -> String {
     std::env::var("GITCODE_WEB_BASE")
         .unwrap_or_else(|_| "https://web-api.gitcode.com".to_string())
+}
+
+/// 全站搜索支持的类型。
+///
+/// 服务端对无法识别的 `type`（pr / org / model / dataset 等）不会报错，而是
+/// 静默按 repo 处理并返回一模一样的结果，所以这里必须显式限制取值，
+/// 否则调用方会拿到看似成功、实则答非所问的数据。
+pub const SEARCH_KINDS: &[&str] = &["repo", "user", "issue"];
+
+/// 每页条数上限。
+///
+/// 服务端的分页有坑：`pp` 在 21..=50 时只返回 20 条，但 `page_count` 仍按 `pp`
+/// 计算，照着翻页会静默漏数据；`pp > 50` 直接返回空。20 是唯一诚实的取值。
+pub const SEARCH_MAX_PER_PAGE: u32 = 20;
+
+/// 网页端全站搜索（GET /api/v1/search/nauth/query）。
+///
+/// 路径里的 `nauth` 就是字面意思——这个接口**不需要任何凭据**，
+/// 是 gc 里唯一一个匿名可用的能力。
+pub fn web_search(query: &str, kind: &str, page: u32, per_page: u32) -> Result<Value> {
+    if query.trim().is_empty() {
+        return Err(anyhow!("搜索关键词不能为空"));
+    }
+    if !SEARCH_KINDS.contains(&kind) {
+        return Err(anyhow!(
+            "不支持的搜索类型 `{}`，可选：{}",
+            kind,
+            SEARCH_KINDS.join(" / ")
+        ));
+    }
+
+    let client = web_client()?;
+
+    // o / repo_type 是网页端固定发的：实测 o 换任何值结果都不变，
+    // repo_type 只有 0 有数据，所以不对外暴露成参数。
+    let url = format!(
+        "{}/api/v1/search/nauth/query?q={}&type={}&p={}&pp={}&o=desc&repo_type=0",
+        web_base().trim_end_matches('/'),
+        enc(query),
+        kind,
+        page.max(1),
+        per_page.clamp(1, SEARCH_MAX_PER_PAGE),
+    );
+
+    let resp = client
+        .get(&url)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("Accept", "application/json")
+        .header("X-Platform", "web")
+        .send()
+        .context("请求 GitCode 搜索接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 搜索接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析搜索响应失败")
+}
+
+/// 把搜索响应压成精简结构。
+///
+/// 原始条目有 40+ 个字段且绝大多数是 null，直接丢给模型既费 token 又难读；
+/// CLI 打印要的也正是这几个字段，所以两边共用。纯函数，便于测试。
+pub fn search_digest(raw: &Value, kind: &str) -> Value {
+    let items: Vec<Value> = raw["content"]
+        .as_array()
+        .map(|a| a.iter().map(|c| digest_one(c, kind)).collect())
+        .unwrap_or_default();
+    json!({
+        "kind": kind,
+        "total": raw["total"].as_u64().unwrap_or(0),
+        "page": raw["page_num"].as_u64().unwrap_or(1),
+        "page_count": raw["page_count"].as_u64().unwrap_or(0),
+        "count": items.len(),
+        "items": items,
+    })
+}
+
+fn digest_one(c: &Value, kind: &str) -> Value {
+    // 空字符串和 null 一律省掉，别给模型喂噪音。
+    let s = |k: &str| c[k].as_str().filter(|v| !v.trim().is_empty());
+    match kind {
+        "user" => json!({
+            "username": s("username"),
+            "nickname": s("nickname"),
+            "url": s("url"),
+            "created_at": s("created_at"),
+        }),
+        "issue" => json!({
+            "repo": s("path_with_namespace"),
+            "iid": c["iid"].as_u64(),
+            "title": s("title"),
+            "state": s("state"),
+            "author": c["author"]["username"].as_str(),
+            "url": s("url"),
+            "updated_at": s("updated_at"),
+        }),
+        // repo（也是兜底）
+        _ => json!({
+            "repo": s("path_with_namespace"),
+            "description": s("description").or_else(|| s("description_cn")),
+            "language": s("main_language"),
+            "stars": c["star_count"].as_u64(),
+            "forks": c["forks_count"].as_u64(),
+            "default_branch": s("default_branches"),
+            "url": s("web_url"),
+            "last_activity_at": s("last_activity_at"),
+        }),
+    }
 }
 
 /// 在仓库讨论区创建一条讨论（POST /api/v1/discuss）
@@ -281,13 +1620,7 @@ pub fn create_discussion(
     title: &str,
     md_content: &str,
 ) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let body = serde_json::json!({
         "title": title,
         "md_content": md_content,
@@ -320,13 +1653,7 @@ pub fn create_discussion(
 /// 注意：id 是讨论的 hash 字符串（取自讨论页 URL 中 /discussions/<hash> 的 hash），
 /// 不是创建时返回的数字 ID。
 pub fn delete_discussion(token: &str, id: &str) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let body = serde_json::json!({ "id": id });
     let url = format!("{}/api/v1/discuss", web_base().trim_end_matches('/'));
     let resp = client
@@ -368,13 +1695,7 @@ struct FileList {
 }
 
 pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> Result<Vec<String>> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（repoId 参数，二次编码）
@@ -388,7 +1709,9 @@ pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> R
     let mut all = Vec::new();
     let mut page = 1u32;
     loop {
-        let url = format!("{}&page_num={}&page_size=100", base, page);
+        // 这个接口认的是 page / per_page；写成 page_num / page_size 会被静默忽略，
+        // 服务端永远回第一页（还照抄 page_count），据它翻页就是死循环。
+        let url = format!("{}&page={}&per_page=100", base, page);
         let resp = client
             .get(&url)
             .bearer_auth(token)
@@ -407,8 +1730,11 @@ pub fn repo_file_list(token: &str, owner: &str, name: &str, ref_name: &str) -> R
             break;
         }
         let v: FileList = serde_json::from_str(&text).context("解析文件列表响应失败")?;
+        let got = v.content.len();
         all.extend(v.content);
-        if v.page_count == 0 || v.page_num >= v.page_count {
+        // 用本地的 page 计数判断终止，不信服务端回显的 page_num——它一旦不回显或回显
+        // 成常数就会卡死。空页也直接收尾，双保险。
+        if got == 0 || v.page_count == 0 || page >= v.page_count {
             break;
         }
         page += 1;
@@ -476,7 +1802,7 @@ pub fn download_tree(
 }
 
 /// 用户资料（网页端 v1 接口 /uc/api/v1/user/setting/profile?username=）
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct UserProfile {
     #[serde(default)]
     pub profile: UserProfileInner,
@@ -490,7 +1816,7 @@ pub struct UserProfile {
     pub github_account: Option<String>,
 }
 
-#[derive(serde::Deserialize, Debug, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Default)]
 pub struct UserProfileInner {
     #[serde(default)]
     pub website: Option<String>,
@@ -505,13 +1831,7 @@ pub struct UserProfileInner {
 /// 查看用户资料（网页端 v1 接口：GET /uc/api/v1/user/setting/profile?username=）
 /// 需浏览器会话 JWT（Bearer）+ 浏览器头。
 pub fn user_profile(token: &str, username: &str) -> Result<UserProfile> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let url = format!(
         "{}/uc/api/v1/user/setting/profile?username={}",
         web_base().trim_end_matches('/'),
@@ -537,6 +1857,99 @@ pub fn user_profile(token: &str, username: &str) -> Result<UserProfile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_search_rejects_bad_kind_before_any_request() {
+        // 校验必须发生在联网之前，否则离线时报的错会答非所问。
+        let e = web_search("vlc", "pr", 1, 10).unwrap_err().to_string();
+        assert!(e.contains("pr"), "{e}");
+        assert!(e.contains("repo / user / issue"), "{e}");
+    }
+
+    #[test]
+    fn web_search_rejects_empty_query() {
+        assert!(web_search("   ", "repo", 1, 10).is_err());
+    }
+
+    #[test]
+    fn search_digest_projects_repo_fields() {
+        let raw = json!({
+            "total": 204, "page_num": 2, "page_count": 11,
+            "content": [{
+                "path_with_namespace": "gh_mirrors/vl/vlc",
+                "description": "VLC media player",
+                "description_cn": "中文简介",
+                "main_language": "C",
+                "star_count": 3, "forks_count": 1,
+                "default_branches": "master",
+                "web_url": "https://gitcode.com/gh_mirrors/vl/vlc",
+                "last_activity_at": "2025-12-25T17:49:09.941+08:00",
+                "hl_name": ["<span style=\"color:red\">vlc</span>"],
+            }],
+        });
+        let d = search_digest(&raw, "repo");
+        assert_eq!(d["total"], 204);
+        assert_eq!(d["page"], 2);
+        assert_eq!(d["page_count"], 11);
+        assert_eq!(d["count"], 1);
+        let it = &d["items"][0];
+        assert_eq!(it["repo"], "gh_mirrors/vl/vlc");
+        assert_eq!(it["description"], "VLC media player");
+        assert_eq!(it["stars"], 3);
+        assert_eq!(it["default_branch"], "master");
+        // 带 HTML 高亮标记的字段不该出现在精简结果里。
+        assert!(it.get("hl_name").is_none());
+    }
+
+    #[test]
+    fn search_digest_falls_back_to_chinese_description() {
+        let raw = json!({ "content": [{
+            "path_with_namespace": "a/b",
+            "description": "",
+            "description_cn": "中文简介",
+        }]});
+        assert_eq!(search_digest(&raw, "repo")["items"][0]["description"], "中文简介");
+    }
+
+    #[test]
+    fn search_digest_projects_user_and_issue() {
+        let u = json!({ "content": [{
+            "username": "gcw_VuGo2vLc", "nickname": "小明",
+            "url": "https://gitcode.com/gcw_VuGo2vLc", "created_at": "2025-04-20 16:19:51",
+        }]});
+        let it = &search_digest(&u, "user")["items"][0];
+        assert_eq!(it["username"], "gcw_VuGo2vLc");
+        assert_eq!(it["nickname"], "小明");
+
+        let i = json!({ "content": [{
+            "path_with_namespace": "org/repo", "iid": 2466, "title": "add ohos_vlc",
+            "state": "closed", "author": { "username": "hu-xiao-" },
+            "url": "https://gitcode.com/org/repo/issues/2466",
+        }]});
+        let it = &search_digest(&i, "issue")["items"][0];
+        assert_eq!(it["iid"], 2466);
+        assert_eq!(it["state"], "closed");
+        assert_eq!(it["author"], "hu-xiao-");
+    }
+
+    #[test]
+    fn search_digest_survives_missing_and_empty_content() {
+        for raw in [json!({}), json!({ "content": [] }), json!({ "content": null })] {
+            let d = search_digest(&raw, "repo");
+            assert_eq!(d["count"], 0);
+            assert_eq!(d["total"], 0);
+            assert_eq!(d["items"].as_array().unwrap().len(), 0);
+        }
+    }
+
+    #[test]
+    fn enc_path_keeps_slashes_but_escapes_the_rest() {
+        // 斜杠必须原样保留，否则 contents/{path} 会被当成单个文件名。
+        assert_eq!(enc_path("src/api.rs"), "src/api%2Ers");
+        assert_eq!(enc_path("docs/我的 文档.md"), "docs/%E6%88%91%E7%9A%84%20%E6%96%87%E6%A1%A3%2Emd");
+        // 整串编码是错的写法，这里确认两者确实不同。
+        assert_ne!(enc_path("a/b"), enc("a/b"));
+    }
 
     #[test]
     fn test_filter_subtree_full() {
@@ -608,13 +2021,7 @@ pub fn repo_file_content(
     r#ref: &str,
     file_path: &str,
 ) -> Result<WebFile> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
     let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
@@ -657,15 +2064,7 @@ pub fn download_files(
     files: &[(String, String)],
     out_dir: &std::path::Path,
 ) -> Result<Vec<(String, Result<(u64, bool)>)>> {
-    let client = Arc::new(
-        reqwest::blocking::Client::builder()
-            .user_agent(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-            )
-            .build()
-            .context("创建 HTTP 客户端失败")?,
-    );
+    let client = Arc::new(web_client()?);
     let token = token.to_string();
     let owner = owner.to_string();
     let name = name.to_string();
@@ -729,6 +2128,8 @@ fn download_one(
         .header("Referer", "https://gitcode.com/")
         .header("Accept", "*/*")
         .header("X-Platform", "web")
+        // 文件大小没有上限，用普通接口的 60 秒会把大文件掐断。
+        .timeout(transfer_timeout())
         .send()
         .context("请求 GitCode 文件内容接口失败")?;
     let status = resp.status();
@@ -764,13 +2165,7 @@ pub fn fork_repo(
     new_name: &str,
     description: &str,
 ) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let body = serde_json::json!({
@@ -810,13 +2205,7 @@ pub fn fork_repo(
 /// 注意：该接口用「数字项目 ID」而非 owner/name，需先通过 v5 接口解析出 id。
 /// 需要浏览器会话 JWT（Bearer）+ 浏览器头。响应体含最新 star_count。
 pub fn star_repo(token: &str, project_id: u64) -> Result<u64> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let url = format!(
         "{}/api/v2/projects/{}/star",
         web_base().trim_end_matches('/'),
@@ -844,13 +2233,7 @@ pub fn star_repo(token: &str, project_id: u64) -> Result<u64> {
 /// 注意：unstar 同样是 POST（与直觉的 DELETE 不同，已抓包确认），同样用数字项目 ID。
 /// 响应体含最新 star_count。
 pub fn unstar_repo(token: &str, project_id: u64) -> Result<u64> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let url = format!(
         "{}/api/v2/projects/{}/unstar",
         web_base().trim_end_matches('/'),
@@ -878,13 +2261,7 @@ pub fn unstar_repo(token: &str, project_id: u64) -> Result<u64> {
 /// body: {"branch": <分支>} —— 空字符串表示同步默认分支。返回 (repo_sync_result, repo_sync_message)。
 /// 该接口仅「提交同步任务」，需再轮询 sync_repo_status 直到 success。
 pub fn sync_repo(token: &str, owner: &str, name: &str, branch: &str) -> Result<(bool, String)> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
     let body = serde_json::json!({ "branch": branch });
@@ -919,13 +2296,7 @@ pub fn sync_repo(token: &str, owner: &str, name: &str, branch: &str) -> Result<(
 /// 返回 (repo_sync_result, repo_sync_message)；result=true 且 message="success" 表示完成。
 /// branch 与提交时一致：空字符串用 `?branch`，否则 `?branch=<分支>`（做百分号编码）。
 pub fn sync_repo_status(token: &str, owner: &str, name: &str, branch: &str) -> Result<(bool, String)> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
     let q = if branch.is_empty() {
@@ -971,13 +2342,7 @@ pub fn wiki_create(
     content: &str,
     message: &str,
 ) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let body = serde_json::json!({
         "repo_path": repo_path,
         "name": title,
@@ -1022,13 +2387,7 @@ pub fn issue_create(
     confidential: bool,
     labels: &[String],
 ) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let body = serde_json::json!({
@@ -1077,13 +2436,7 @@ pub fn issue_create(
 /// 列出 Issue（网页端 v2）：GET /issuepr/api/v1/issue/{owner%2Fname}/issues
 /// state 映射：open -> opened（网页端用 opened/closed）。返回 Issue 数组。
 pub fn issue_list(token: &str, owner: &str, name: &str, state: &str) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let st = if state.eq_ignore_ascii_case("open") {
@@ -1121,13 +2474,7 @@ pub fn issue_list(token: &str, owner: &str, name: &str, state: &str) -> Result<V
 /// 查看单个 Issue（网页端 v2）：GET /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}
 /// 返回 Issue 完整 JSON（含 iid / web_url / description 等）。
 pub fn issue_view(token: &str, owner: &str, name: &str, iid: u64) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let url = format!(
@@ -1158,13 +2505,7 @@ pub fn issue_view(token: &str, owner: &str, name: &str, iid: u64) -> Result<Valu
 /// 关闭 Issue（网页端 v2）：PUT /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}/close
 /// body：{"state_event":"close","discussions":""}（逆向自网页关闭请求）。返回更新后的 Issue JSON。
 pub fn issue_close(token: &str, owner: &str, name: &str, iid: u64) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let body = serde_json::json!({ "state_event": "close", "discussions": "" });
@@ -1197,13 +2538,7 @@ pub fn issue_close(token: &str, owner: &str, name: &str, iid: u64) -> Result<Val
 
 /// 重新打开 Issue（网页端 v2）：与关闭同一端点，仅 state_event 改为 "reopen"。
 pub fn issue_reopen(token: &str, owner: &str, name: &str, iid: u64) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let body = serde_json::json!({ "state_event": "reopen", "discussions": "" });
@@ -1239,13 +2574,7 @@ pub fn issue_reopen(token: &str, owner: &str, name: &str, iid: u64) -> Result<Va
 /// body：{"project_id":"owner%2Fname","issue_iid":<iid>,"body":"..."}（逆向自网页「回复」请求）。
 /// 返回 discussion 对象（含 notes 数组；首条 note 的 id 即评论 id）。
 pub fn issue_reply(token: &str, owner: &str, name: &str, iid: u64, body: &str) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let b = serde_json::json!({
@@ -1291,13 +2620,7 @@ pub fn issue_edit(
     title: Option<&str>,
     description: Option<&str>,
 ) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let mut body = serde_json::Map::new();
@@ -1344,13 +2667,7 @@ pub fn issue_attachment_upload(
     name: &str,
     file_path: &std::path::Path,
 ) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
     let bytes = std::fs::read(file_path).map_err(|e| anyhow!("读取附件 {} 失败: {}", file_path.display(), e))?;
@@ -1406,13 +2723,7 @@ pub fn repo_compare(
     from: &str,
     to: &str,
 ) -> Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let repo_id = repo_path.replace('/', "%252F"); // 二次编码（repoId / target_id）
@@ -1449,13 +2760,7 @@ pub fn repo_compare(
 /// 必须在 Cookie 里同时携带旧的 access 与 refresh，否则服务端会注销会话。
 /// 返回新的 (access, refresh)。token 会同时出现在 JSON body 与 Set-Cookie 中。
 pub fn refresh_web_token(access: &str, refresh: &str) -> Result<(String, String)> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-             Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-        )
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = web_client()?;
     let cookie = format!(
         "GITCODE_ACCESS_TOKEN={}; GITCODE_REFRESH_TOKEN={}",
         access, refresh
