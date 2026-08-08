@@ -3,6 +3,10 @@
 `gc` 是一个用 Rust 写的 GitCode / AtomGit 命令行客户端，风格对标 GitHub 官方的 `gh`。
 它封装了 GitCode 的 **v5 开放 API**（Gitee 兼容）以及网页端的 **v1 讨论接口**，让你不用打开浏览器就能管理仓库、Issue、PR、发行版和讨论。
 
+## 生成说明
+
+本工具**完全由 CodeBuddy CLI 的 Hy3 模型自行生成**：全部代码实现由 Hy3 完成，仓库所有者仅提供提示词（prompt）与需求，不参与代码编写。
+
 ## 安装
 
 ```bash
