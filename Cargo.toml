@@ -3,6 +3,8 @@ name = "gc"
 version = "0.1.0"
 edition = "2021"
 description = "GitCode (AtomGit) 命令行工具，类似 gh"
+license = "MIT"
+repository = "https://gitcode.com/ghhhJoshrjnrhr/gc"
 
 [dependencies]
 anyhow = "1.0"

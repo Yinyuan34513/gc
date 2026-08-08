@@ -184,6 +184,13 @@ gc discussion delete cd921cf8f66f441cb07cbea7135e10ca
 
 自用工具，按你自己的需要随意改。
 
+### 许可证
+
+本项目（`gc`）以 **MIT 许可证** 发布，完整文本见 [`LICENSE`](LICENSE)。
+
+MIT 是极宽松的 permissive 许可，与 BSD、Apache-2.0、ISC 等同样互相兼容；
+本项目也完全兼容其所包含的 MIT 代码（见下方第三方声明），可自由使用、修改与再分发。
+
 ### 第三方声明
 
 PR 全生命周期、分支 / 提交 / 文件、仓库治理（tag / hook / label / milestone /
