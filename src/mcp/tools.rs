@@ -1421,6 +1421,50 @@ static ALL: &[Tool] = &[
         },
     },
     Tool {
+        name: "gc_repo_set_tags",
+        description: "设置仓库标签（tag_list，整体替换；传空数组则清空）。需要网页端 JWT。\
+                      该接口为整体替换式，故会先取回当前仓库名/描述/主页并原样回填，避免被清空。",
+        schema: || {
+            schema(
+                &[
+                    p_repo(),
+                    ("tags", p_strs("一个或多个标签，整体替换现有标签；传空数组 [] 则清空")),
+                ],
+                &["repo", "tags"],
+            )
+        },
+        read_only: false,
+        destructive: false,
+        handler: |a| {
+            let (o, n) = repo_of(a)?;
+            // 先取回当前 name/description/homepage，避免 v2 PUT 整体替换把它们清空
+            let cur = pat_client()?.repo(&o, &n)?;
+            let name_now = cur["name"].as_str().unwrap_or(&n).to_string();
+            let desc_now = cur["description"].as_str().unwrap_or("").to_string();
+            let home_now = cur["homepage"].as_str().unwrap_or("").to_string();
+            let tags = a
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let body = json!({
+                "name": name_now,
+                "description": desc_now,
+                "homepage": home_now,
+                "tag_list": tags,
+            });
+            let v = api::update_project_v2(&web_token()?, &o, &n, &body)?;
+            let tags_now: Vec<String> = v["tag_list"]
+                .as_array()
+                .map(|t| t.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            Ok(json!({
+                "repo": v["full_name"].as_str().unwrap_or(&format!("{}/{}", o, n)),
+                "tag_list": tags_now,
+            }))
+        },
+    },
+    Tool {
         name: "gc_repo_transfer",
         description: "把仓库转移给其他用户或组织。原路径会失效，属破坏性操作。",
         schema: || {

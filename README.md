@@ -71,8 +71,8 @@ gc repo read owner/name <file> [--ref main] [--output path]   # 读取文件内�
 gc repo download owner/name <file1> <file2> ... [--ref main] [--output dir]   # 多线程流式下载多个文件
 gc repo delete owner/name --yes                                # 删除仓库（危险操作，必须加 --yes 确认）
 
-# 以下命令的 [owner/name] 都可省略，省略时从当前目录的 git remote 推断
 gc repo update [owner/name] [--name x] [--description "..."] [--homepage url] [--private|--public] [--default-branch main]
+gc repo tag [TAGS]... [--repo owner/name]     # 设置仓库标签（tag_list，整体替换；不给标签则清空）。需网页端 JWT（gc web-token set）
 gc repo transfer <new-owner> [--repo owner/name] [--team-ids 1,2] --yes   # 转移归属（危险操作）
 gc repo forks [owner/name] [--sort newest|oldest|stargazers]   # 列出该仓库的 fork
 gc repo contributors [owner/name] [--type committers|authors] [--stats] [--author alice]
@@ -173,6 +173,104 @@ gc discussion create \
 # id 取讨论页 URL /discussions/<hash> 里的 hash（不是数字 id）
 gc discussion delete cd921cf8f66f441cb07cbea7135e10ca
 ```
+
+## MCP 服务器（给 AI 客户端用）
+
+`gc` 内置一个 MCP（Model Context Protocol）服务器，把上面的能力包装成 AI 客户端（如
+Claude Desktop、各种 IDE 插件）可调用的工具。传输层是 **stdio 上的换行分隔 JSON-RPC 2.0**，
+日志走 stderr（stdout 是协议通道，任何多余输出都会破坏会话）。
+
+```bash
+# 启动服务器（默认不开破坏性工具，最大并发 4）
+gc mcp start
+
+# 暴露破坏性工具（删仓库 / 改可见性 / 删讨论 / 删评论等），给「敢放手让 AI 改东西」的场景
+gc mcp start --allow-destructive
+
+# 调并发数（1 表示完全串行）
+gc mcp start --max-concurrency 2
+```
+
+客户端配置示例（stdio 方式，AI 客户端会在需要时拉起这个进程）：
+
+```json
+{
+  "mcpServers": {
+    "gitcode": {
+      "command": "gc",
+      "args": ["mcp", "start"]
+    }
+  }
+}
+```
+
+> 鉴权与环境变量与 CLI 完全一致（见上文「配置」）：需要 PAT（`GITCODE_TOKEN` 或
+> `gc token set`），讨论 / Issue / 文件读取 / Wiki / 标签 等接口还需要网页端 JWT
+>（`GITCODE_WEB_TOKEN` 或 `gc web-token set`）。`repo` 参数在大部分工具里都可省略，
+> 省略时从当前目录的 git remote 推断。
+
+### 工具一览
+
+下表按类别列出全部工具。带 `★` 的是破坏性（默认不注册，需 `--allow-destructive`）工具。
+
+**认证 / 用户**
+- `gc_auth_status` — 校验 PAT 是否有效并返回当前用户
+- `gc_refresh_web_token` — 刷新网页端 JWT（鉴权失败时用它再重试）
+- `gc_user_view` *(网页端)* — 查看用户公开资料
+- `gc_user_profile` *(v5)* — 查看用户资料
+- `gc_user_update` — 更新当前用户资料
+- `gc_user_followers` / `gc_user_following` — 粉丝 / 关注
+- `gc_user_starred` / `gc_user_subscriptions` — 收藏的仓库 / 订阅的仓库
+- `gc_user_namespaces` / `gc_user_namespace` — 命名空间
+- `gc_user_keys` / `gc_user_key` / `gc_user_key_add` / `gc_user_key_delete` ★ — SSH 公钥
+- `gc_user_issues` / `gc_user_prs` — 我的 Issue / PR
+- `gc_user_org_membership` / `gc_user_org_leave` ★ — 组织成员资格 / 退出组织
+- `gc_user_orgs` — 用户所属组织
+- `gc_user_events` — 用户动态
+- `gc_user_emails` — 我的邮箱
+
+**仓库**
+- `gc_repo_view` / `gc_repo_list` — 查看 / 列出仓库
+- `gc_repo_tree` *(网页端)* / `gc_repo_read` *(网页端)* — 文件树 / 读文件
+- `gc_repo_create` — 建仓库
+- `gc_repo_fork` *(网页端)* — Fork
+- `gc_repo_update` — 改仓库属性（名 / 描述 / 主页 / 可见性 / 默认分支）
+- `gc_repo_set_tags` *(网页端)* — 设置仓库标签（tag_list，整体替换；传 `[]` 清空；会保留名/描述/主页不被覆盖）
+- `gc_repo_transfer` ★ — 转移归属
+- `gc_repo_forks` / `gc_repo_contributors` / `gc_repo_languages` / `gc_repo_events` / `gc_repo_stats`
+- `gc_repo_settings` / `gc_repo_settings_update` — 高级设置查看 / 更新
+- `gc_repo_module` — 开关功能模块（wiki / Issue / 安全 / PR / fork / 分析 / 讨论）
+- `gc_repo_roles` / `gc_repo_transition` — 自定义角色 / 权限继承模式
+- `gc_repo_archive` — 归档 / 取消归档
+- `gc_repo_star` — 加星 / 取消加星
+- `gc_repo_delete` ★ / `gc_repo_set_visibility` ★ — 删仓库 / 改可见性
+- `gc_repo_sync` — 硬重置式同步 fork
+
+**Issue / PR / 讨论**
+- `gc_issue_list` / `gc_issue_view` / `gc_issue_create` / `gc_issue_reply` / `gc_issue_edit` / `gc_issue_close` / `gc_issue_reopen`
+- `gc_pr_list` / `gc_pr_view` / `gc_pr_create` / `gc_pr_files` / `gc_pr_commits` / `gc_pr_comments` / `gc_pr_comment` / `gc_pr_comment_reply` / `gc_pr_comment_edit` / `gc_pr_comment_delete` ★
+- `gc_pr_review` / `gc_pr_test` / `gc_pr_reviewers` / `gc_pr_testers` / `gc_pr_assignees` / `gc_pr_option_reviewers` / `gc_pr_labels` / `gc_pr_linked_issues` / `gc_pr_link_issues`
+- `gc_pr_close` / `gc_pr_reopen` / `gc_pr_history` / `gc_pr_logs` / `gc_pr_edit` / `gc_pr_merge` ★
+- `gc_discussion_create` / `gc_discussion_delete` ★
+
+**分支 / 提交 / 文件**
+- `gc_branch_list` / `gc_branch_view` / `gc_branch_create` / `gc_branch_protect` / `gc_branch_rules` / `gc_branch_delete` ★
+- `gc_commit_list` / `gc_commit_view` / `gc_commit_diff` / `gc_commit_compare` / `gc_commit_comment`
+- `gc_file_list` / `gc_file_get` / `gc_file_write` / `gc_file_delete` ★
+
+**标签（tag）/ Webhook / Label / 里程碑 / 协作者 / 组织**
+- `gc_tag_list` / `gc_tag_view` / `gc_tag_create` / `gc_tag_delete` ★ / `gc_tag_protect` / `gc_tag_unprotect`
+- `gc_tag_protected_list` / `gc_tag_protected_view` / `gc_tag_protected_create` / `gc_tag_protected_update` / `gc_tag_protected_delete` ★
+- `gc_hook_list` / `gc_hook_view` / `gc_hook_create` / `gc_hook_update` / `gc_hook_delete` ★
+- `gc_label_list` / `gc_label_view` / `gc_label_create` / `gc_label_update` / `gc_label_delete` ★
+- `gc_milestone_list` / `gc_milestone_view` / `gc_milestone_create` / `gc_milestone_update` / `gc_milestone_delete` ★
+- `gc_collaborator_list` / `gc_collaborator_add` / `gc_collaborator_remove` ★ / `gc_collaborator_permission`
+- `gc_org_list` / `gc_org_view` / `gc_org_members` / `gc_org_repos`
+
+**发行版 / 搜索 / Wiki**
+- `gc_release_list` / `gc_release_view` / `gc_release_create`
+- `gc_search_repos` / `gc_search_users` / `gc_search_issues` / `gc_search_web` *(网页端)*
+- `gc_wiki_create` *(网页端)*
 
 ## 实现说明（踩过的坑）
 

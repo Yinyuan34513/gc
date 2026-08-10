@@ -2201,6 +2201,42 @@ pub fn fork_repo(
     serde_json::from_str::<Value>(&text).context("解析 fork 响应失败")
 }
 
+/// 更新仓库的网页端元数据（网页端 v2 接口：PUT /api/v2/projects/{owner%2Fname}）。
+///
+/// body 可含 name / description / homepage / tag_list，对应仓库设置页的「仓库名 / 简介 /
+/// 主页 / 标签」。该接口是整体替换式：调用方需先取回当前值，把要保留的字段一并放进 body，
+/// 否则会被清掉（例如只传 tag_list 会把 description / homepage 清空）。
+/// 需要浏览器会话 JWT（Bearer）+ 浏览器头（与讨论 / Star / Fork 的 v2 接口同源）。
+pub fn update_project_v2(token: &str, owner: &str, name: &str, body: &Value) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let url = format!(
+        "{}/api/v2/projects/{}",
+        web_base().trim_end_matches('/'),
+        path_seg,
+    );
+    let page_ref = format!("https://gitcode.com/{}", repo_path);
+    let resp = client
+        .put(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(body)
+        .send()
+        .context("请求 GitCode 仓库更新接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode 仓库更新接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str::<Value>(&text).context("解析仓库更新响应失败")
+}
+
 /// 给仓库点 Star（网页端 v2 接口：POST /api/v2/projects/{id}/star）
 /// 注意：该接口用「数字项目 ID」而非 owner/name，需先通过 v5 接口解析出 id。
 /// 需要浏览器会话 JWT（Bearer）+ 浏览器头。响应体含最新 star_count。

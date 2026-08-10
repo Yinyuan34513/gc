@@ -734,6 +734,18 @@ enum RepoAction {
         #[arg(long = "default-branch")]
         default_branch: Option<String>,
     },
+    /// 设置仓库标签（tag_list，整体替换；不给标签则清空）。需网页端 JWT（gc web-token set）
+    ///
+    /// 示例：gc repo tag 应用 工具 --repo owner/name
+    ///       在仓库目录下可省略 --repo：gc repo tag 应用 工具
+    Tag {
+        /// 一个或多个标签（空格分隔），如 应用 工具。不给则清空标签
+        #[arg(num_args = 0..)]
+        tags: Vec<String>,
+        /// 仓库 owner/name；省略则从当前目录的 git remote 推断
+        #[arg(long = "repo")]
+        repo: Option<String>,
+    },
     /// 转移仓库归属到其他用户或组织（危险操作，需 --yes 确认）
     Transfer {
         /// 新的归属者（用户名或组织名）
@@ -1827,6 +1839,36 @@ pub fn run() -> Result<()> {
                     let count = crate::api::star_repo(&token, id)?;
                     println!("已给 {} 点 Star（当前 {} 颗）", repo, count);
                 }
+            }
+            RepoAction::Tag { repo, tags } => {
+                let (o, n) = resolve_repo(repo)?;
+                // 先取回当前 name/description/homepage，避免 v2 PUT 整体替换把它们清空
+                let cur = api.repo(&o, &n)?;
+                let name_now = cur["name"].as_str().unwrap_or(&n).to_string();
+                let desc_now = cur["description"].as_str().unwrap_or("").to_string();
+                let home_now = cur["homepage"].as_str().unwrap_or("").to_string();
+                let body = serde_json::json!({
+                    "name": name_now,
+                    "description": desc_now,
+                    "homepage": home_now,
+                    "tag_list": tags,
+                });
+                let token = web_access_token()?;
+                let v = crate::api::update_project_v2(&token, &o, &n, &body)?;
+                let tags_now: Vec<String> = v["tag_list"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let shown = if tags_now.is_empty() {
+                    "（空）".to_string()
+                } else {
+                    tags_now.join("、")
+                };
+                println!(
+                    "已更新 {} 的标签：{}",
+                    v["full_name"].as_str().unwrap_or(&format!("{}/{}", o, n)),
+                    shown
+                );
             }
             RepoAction::Tree(a) => run_tree(&a.repo, &a.branch)?,
             RepoAction::Read(a) => run_read(&a.repo, &a.file, &a.branch, a.output.as_deref())?,
