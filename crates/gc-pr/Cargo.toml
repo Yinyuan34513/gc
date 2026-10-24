@@ -1,0 +1,12 @@
+[package]
+name = "gc-pr"
+description = "gc PR 域：PR 网页端 API 层（cherry-pick / revert / 审批 / 列表统计 / 评论）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

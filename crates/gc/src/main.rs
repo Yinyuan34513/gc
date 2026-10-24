@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    gc::cli::run()
+    gc_cli::cli::run()
 }

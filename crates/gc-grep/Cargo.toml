@@ -1,0 +1,13 @@
+[package]
+name = "gc-grep"
+description = "gc 搜索域（仓库内容）：文件列表 / 下载 / tree SHA（供 ripgrep 稀疏缓存搜索）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+rayon.workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "gc-core"
+description = "gc 公共层：API 客户端、认证、配置"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+dirs.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+regex.workspace = true
+rayon.workspace = true
+toml = "0.8"
+rpassword = "1.0"
+indicatif = "0.17"
+tungstenite = "0.23"
+rusqlite = { version = "0.32", features = ["bundled"] }

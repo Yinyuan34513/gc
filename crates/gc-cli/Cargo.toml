@@ -1,0 +1,30 @@
+[package]
+name = "gc-cli"
+description = "gc 命令行层：参数定义、子命令分发与人类可读输出"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+gc-mcp.workspace = true
+gc-repo.workspace = true
+gc-pr.workspace = true
+gc-issues.workspace = true
+gc-grep.workspace = true
+gc-search.workspace = true
+gc-skill.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
+termimad = "0.35.5"
+grep = "0.4.1"
+regex.workspace = true
+rpassword = "1.0"

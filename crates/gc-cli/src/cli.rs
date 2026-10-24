@@ -4781,20 +4781,25 @@ pub(crate) fn resolve_repo(repo: Option<String>) -> Result<(String, String)> {
 
 fn parse_gitcode_repo(url: &str) -> Option<String> {
     let u = url.trim();
-    // 支持 gitcode.com / atomgit.com 等任意主机的三种形式：
+    // 只认 gitcode.com / atomgit.com 两种主机的三种形式：
     // https://host/owner/repo(.git)、git@host:owner/repo(.git)、owner/repo
+    const HOSTS: [&str; 2] = ["gitcode.com", "atomgit.com"];
     let stripped = if let Some(p) = u.find("://") {
-        // 去掉 scheme://host[:port]/，只留路径
+        // 去掉 scheme://，取 host 与路径
         let rest = &u[p + 3..];
-        match rest.find('/') {
-            Some(i) => &rest[i + 1..],
-            None => return None,
+        let i = rest.find('/')?;
+        let host = &rest[..i];
+        if !HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}"))) {
+            return None;
         }
+        &rest[i + 1..]
     } else if let Some(r) = u.strip_prefix("git@") {
-        match r.find(':') {
-            Some(i) => &r[i + 1..],
-            None => return None,
+        let i = r.find(':')?;
+        let host = &r[..i];
+        if !HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}"))) {
+            return None;
         }
+        &r[i + 1..]
     } else {
         u
     };

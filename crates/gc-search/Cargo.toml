@@ -1,0 +1,12 @@
+[package]
+name = "gc-search"
+description = "gc 搜索域（全站）：网页端 v1 搜索与摘要"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

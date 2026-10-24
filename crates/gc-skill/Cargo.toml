@@ -1,0 +1,12 @@
+[package]
+name = "gc-skill"
+description = "gc 技能域：把 gc 用法安装到 AI 编码工具（Claude Code / Codex / OpenCode / CodeBuddy / Gemini / AtomCode）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+anyhow.workspace = true
+dirs.workspace = true

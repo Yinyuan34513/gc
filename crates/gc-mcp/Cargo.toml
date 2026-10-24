@@ -1,0 +1,18 @@
+[package]
+name = "gc-mcp"
+description = "gc 的 MCP 服务端：stdio JSON-RPC 传输、工具注册表（迁移到 rmcp SDK）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+tokio.workspace = true
+rmcp = { version = "0.8", features = ["server", "transport-io", "macros"] }
+
+[dev-dependencies]

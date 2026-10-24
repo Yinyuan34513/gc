@@ -1,0 +1,13 @@
+[package]
+name = "gc-issues"
+description = "gc Issue 域：Issue 网页端 v2 API 层（创建 / 列表 / 评论 / 附件 / 编辑）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gc-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+serde.workspace = true

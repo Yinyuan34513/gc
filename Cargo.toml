@@ -1,29 +1,43 @@
-[package]
-name = "gc"
+[workspace]
+resolver = "2"
+members = [
+    "crates/gc",
+    "crates/gc-core",
+    "crates/gc-cli",
+    "crates/gc-mcp",
+    "crates/gc-repo",
+    "crates/gc-pr",
+    "crates/gc-issues",
+    "crates/gc-grep",
+    "crates/gc-search",
+    "crates/gc-skill",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "GitCode (AtomGit) 命令行工具，类似 gh"
 license = "MIT"
 repository = "https://gitcode.com/ghhhJoshrjnrhr/gc"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
 dirs = "5.0"
-rpassword = "1.0"
-indicatif = "0.17"
 base64 = "0.22"
 percent-encoding = "2"
-tungstenite = "0.23"
-rusqlite = { version = "0.32", features = ["bundled"] }
-jaq-core = "3"
-jaq-std = "3"
-jaq-json = "2"
-termimad = "0.35.5"
-rayon = "1.12.0"
 regex = "1.13.1"
-grep = "0.4.1"
+rayon = "1.12.0"
+tokio = { version = "1.40", features = ["full"] }
+
+# 内部 crate
+gc-core = { path = "crates/gc-core" }
+gc-cli = { path = "crates/gc-cli" }
+gc-mcp = { path = "crates/gc-mcp" }
+gc-repo = { path = "crates/gc-repo" }
+gc-pr = { path = "crates/gc-pr" }
+gc-issues = { path = "crates/gc-issues" }
+gc-grep = { path = "crates/gc-grep" }
+gc-search = { path = "crates/gc-search" }
+gc-skill = { path = "crates/gc-skill" }
