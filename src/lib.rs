@@ -5,6 +5,7 @@
 //! 而不必去解析 CLI 的人类可读输出。
 
 pub mod api;
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod mcp;

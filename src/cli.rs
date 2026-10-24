@@ -5,8 +5,6 @@ use serde_json::Value;
 use serde_json::json;
 use serde_json::Map;
 
-use std::io::IsTerminal;
-
 use crate::api::ApiClient;
 use crate::config;
 
@@ -24,8 +22,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 检查当前 token 是否有效
-    Auth,
+    /// 认证（无子命令时检查当前 token 是否有效）
+    Auth(AuthCmd),
     /// 管理个人访问令牌
     Token(TokenCmd),
     /// 仓库操作
@@ -48,8 +46,16 @@ enum Command {
     Discussion(DiscussionCmd),
     /// 刷新网页端 JWT（用于讨论等 v1 接口）
     Refresh,
+    /// 安装 gc 二进制到 PATH（默认 ~/.local/bin；--system 装到 /usr/local/bin，需要时自动 sudo）
+    Install {
+        /// 安装到系统目录 /usr/local/bin（非 root 时自动用 sudo）
+        #[arg(long)]
+        system: bool,
+    },
     /// 管理网页端 JWT（access / refresh token）
     WebToken(WebTokenCmd),
+    /// 裸 API 透传（直接调 v5 开放接口）
+    Api(ApiArgs),
     /// 用户操作（网页端 v1 接口）
     User(UserCmd),
     /// Wiki 操作（网页端 v2 接口）
@@ -606,9 +612,32 @@ enum RepoAction {
         /// 直接打印完整 JSON（默认打印精简摘要）
         #[arg(long)]
         json: bool,
+        /// 用 jq 表达式过滤输出（优先于 --json）
+        #[arg(long)]
+        jq: Option<String>,
     },
     /// 列出仓库（省略 owner 则列出当前用户）
     List { owner: Option<String> },
+    /// 在仓库全部文件内容里做正则搜索（本地临时目录 + rayon 并行下载）
+    Grep {
+        /// 正则表达式（rust regex 语法）
+        pattern: String,
+        /// 文件名过滤（可重复，支持 * ? 通配，如 --include=*.rs --include=*.toml）
+        #[arg(long = "include", num_args = 0..)]
+        include: Vec<String>,
+        /// 仓库 owner/name（省略则从当前 git remote 推断）
+        #[arg(long)]
+        repo: Option<String>,
+        /// 显式指定 owner（与 --repo 二选一；此时仓库名用位置参数前无法表达，推荐 --repo）
+        #[arg(long)]
+        owner: Option<String>,
+        /// 分支 / 标签，默认 main
+        #[arg(long = "ref", default_value = "main")]
+        branch: String,
+        /// 忽略大小写
+        #[arg(short = 'i')]
+        ignore_case: bool,
+    },
     /// 克隆仓库到本地（默认克隆到 ./<name>）
     Clone {
         repo: String,
@@ -910,6 +939,31 @@ enum RepoAction {
 }
 
 #[derive(Parser)]
+struct AuthCmd {
+    #[command(subcommand)]
+    action: Option<AuthAction>,
+}
+
+#[derive(Subcommand)]
+enum AuthAction {
+    /// 登录 GitCode（浏览器自动抓取登录态 / 粘贴 token，参考 gh auth login）
+    Login {
+        /// 强制走浏览器登录流程
+        #[arg(long)]
+        web: bool,
+        /// 从 stdin 读取 token（脚本场景：gc auth login --with-token < mytoken.txt）
+        #[arg(long)]
+        with_token: bool,
+    },
+    /// 直接输出 PAT（明文打印，可管道给其他工具：export GIT_TOKEN=$(gc auth pal)）
+    Pal {
+        /// 输出网页端 access token 而非 PAT
+        #[arg(long)]
+        web: bool,
+    },
+}
+
+#[derive(Parser)]
 struct TokenCmd {
     #[command(subcommand)]
     action: TokenAction,
@@ -931,14 +985,28 @@ enum IssueAction {
     List {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
+        /// 仓库（位置参数，owner/name 或 URL）
+        repo_pos: Option<String>,
         #[arg(long, default_value = "open")]
         state: String,
+        /// 打印完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 用 jq 表达式过滤输出（优先于 --json）
+        #[arg(long)]
+        jq: Option<String>,
     },
     /// 查看某个 Issue
     View {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
         number: u64,
+        /// 打印完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 用 jq 表达式过滤输出（优先于 --json）
+        #[arg(long)]
+        jq: Option<String>,
     },
     /// 创建 Issue
     Create {
@@ -948,6 +1016,9 @@ enum IssueAction {
         #[arg(long)]
         title: Option<String>,
         #[arg(long, default_value = "")] body: String,
+        /// 从 Markdown 文件读取正文（覆盖 --body）
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
         /// 附件（可重复多次）
         #[arg(long, num_args = 0..)]
         attach: Vec<String>,
@@ -1007,14 +1078,90 @@ enum PrAction {
     List {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
+        /// 仓库（位置参数，owner/name 或 URL）
+        repo_pos: Option<String>,
         #[arg(long, default_value = "open")]
         state: String,
+        /// 走网页端接口（支持排序与统计）
+        #[arg(long)]
+        web: bool,
+        /// 网页端排序字段：updated_at / merged_at / created_at（默认 updated_at）
+        #[arg(long, default_value = "updated_at")]
+        order_by: String,
+        /// 网页端排序方向：asc / desc（默认 desc）
+        #[arg(long, default_value = "desc")]
+        sort: String,
+        /// 网页端页码
+        #[arg(long, default_value_t = 1)]
+        page: u64,
+        /// 网页端每页数量
+        #[arg(long, default_value_t = 10)]
+        per_page: u64,
+        /// 只显示各状态 PR 的数量统计（all/opened/merged/closed）
+        #[arg(long)]
+        count: bool,
+        /// 打印完整 JSON（跳过 --web 的分页包裹也原样输出）
+        #[arg(long)]
+        json: bool,
+        /// 用 jq 表达式过滤输出（优先于 --json）
+        #[arg(long)]
+        jq: Option<String>,
+    },
+    /// 显示相关 PR 的状态（当前分支 / 我创建 / 指派给我 / 待我评审）
+    Status {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+    },
+    /// 在 git 中检出 PR（创建本地分支 pr/<编号>/<源分支>）
+    Checkout {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+    },
+    /// 查看单个 PR 的 CI / 合并状态
+    Checks {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+    },
+    /// 查看 PR 的改动
+    Diff {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+        /// 仅显示改动文件列表
+        #[arg(long)]
+        name_only: bool,
+    },
+    /// 锁定 PR（讨论将被锁定）
+    Lock {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+    },
+    /// 将 PR 标记为准备评审（退出草稿）
+    Ready {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+    },
+    /// 解锁 PR（解除锁定）
+    Unlock {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
     },
     /// 查看某个 PR
     View {
         #[arg(long, value_name = "REPO")]
         repo: Option<String>,
         number: u64,
+        /// 打印完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 用 jq 表达式过滤输出（优先于 --json）
+        #[arg(long)]
+        jq: Option<String>,
     },
     /// 创建 Pull Request（创建前用网页端 v2 对比接口预览 diff）
     Create {
@@ -1024,6 +1171,9 @@ enum PrAction {
         #[arg(long)]
         title: Option<String>,
         #[arg(long, default_value = "")] body: String,
+        /// 从 Markdown 文件读取正文（覆盖 --body）
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
         /// 源分支（要合并的分支，对应 compare 的 from）
         #[arg(long)] head: String,
         /// 目标分支（合并到的分支，对应 compare 的 to）
@@ -1121,6 +1271,42 @@ enum PrAction {
     Label(PrLabelCmd),
     /// 关联 Issue 管理
     Link(PrLinkCmd),
+    /// Cherry-pick 已合并的 PR（网页端接口，可同时创建新 MR）
+    CherryPick {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+        /// cherry-pick 到的目标分支（默认目标仓库默认分支）
+        #[arg(long)]
+        branch: Option<String>,
+        /// cherry-pick 后自动创建新的 MR
+        #[arg(long, default_value_t = true)]
+        with_new_merge_request: bool,
+    },
+    /// Revert 已合并的 PR（网页端接口，可同时创建新 MR）
+    Revert {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+        /// revert 到的目标分支
+        #[arg(long)]
+        branch: Option<String>,
+        /// revert 后自动创建新的 MR
+        #[arg(long, default_value_t = true)]
+        with_new_merge_request: bool,
+    },
+    /// PR 审批：approve（通过）/ reset（撤销）（网页端接口）
+    Approval {
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        number: u64,
+        /// 操作：approve 或 reset
+        #[arg(long)]
+        action: String,
+        /// 绕过未满足的审批条件
+        #[arg(long)]
+        force: bool,
+    },
     /// 查看 PR 的修改历史
     History {
         #[arg(long, value_name = "REPO")]
@@ -1155,12 +1341,18 @@ enum PrCommentAction {
         number: u64,
         #[arg(long)]
         body: String,
+        /// 从 Markdown 文件读取评论正文（覆盖 --body）
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
         /// 行级评论的文件路径
         #[arg(long)]
         path: Option<String>,
         /// 行级评论的行号
         #[arg(long)]
         position: Option<u64>,
+        /// 走网页端接口（POST /issuepr/api/v1/projects/.../merge_request/{iid}/notes）
+        #[arg(long)]
+        web: bool,
     },
     /// 在某条讨论线程下回复
     Reply {
@@ -1368,6 +1560,19 @@ enum DiscussionAction {
 }
 
 #[derive(Parser)]
+struct ApiArgs {
+    /// HTTP 方法（GET/POST/PUT/PATCH/DELETE，默认 GET）
+    #[arg(short = 'm', long, default_value = "GET")]
+    method: String,
+    /// API 路径（相对 v5 base，可带 query，如 /repos/owner/name/pulls?state=open）
+    #[arg(short = 'p', long)]
+    path: String,
+    /// 请求体（JSON 字符串，GET 可省略）
+    #[arg(short = 'b', long, default_value = "")]
+    body: String,
+}
+
+#[derive(Parser)]
 struct WebTokenCmd {
     #[command(subcommand)]
     action: WebTokenAction,
@@ -1539,14 +1744,43 @@ pub fn run() -> Result<()> {
     let api = ApiClient::new(config::api_base(), token)?;
 
     match cli.command {
-        Command::Auth => {
-            let u = api.authenticated_user()?;
-            println!(
-                "已认证: {} ({})",
-                u["login"].as_str().unwrap_or("?"),
-                u["name"].as_str().unwrap_or("?")
-            );
-        }
+        Command::Auth(c) => match c.action {
+            None => {
+                if config::load_token()?.is_none() {
+                    eprintln!("未登录。运行 `gc auth login` 登录");
+                    return Ok(());
+                }
+                let u = api.authenticated_user()?;
+                println!(
+                    "已认证: {} ({})",
+                    u["login"].as_str().unwrap_or("?"),
+                    u["name"].as_str().unwrap_or("?")
+                );
+            }
+            Some(AuthAction::Login { web, with_token }) => {
+                crate::auth::login(web, with_token)?;
+            }
+            Some(AuthAction::Pal { web }) => {
+                let token = if web {
+                    let (access, _) = config::load_web_tokens()?;
+                    access
+                } else {
+                    config::load_token()?.unwrap_or_default()
+                };
+                if token.trim().is_empty() {
+                    anyhow::bail!("未配置 token，请先 gc token set / gc auth login");
+                }
+                // 明文直接输出，方便 $(gc auth pal) 管道使用；不带任何前缀
+                println!("{}", token);
+            }
+            None => {
+                // 无子命令时检查 token 有效性
+                let token = config::load_token()?.unwrap_or_default();
+                let api = ApiClient::new(config::api_base(), if token.is_empty() { None } else { Some(token) })?;
+                let me = api.authenticated_user()?;
+                println!("token 有效，当前用户：{}", me["login"].as_str().unwrap_or("?"));
+            }
+        },
 
         Command::Token(c) => match c.action {
             TokenAction::Set => {
@@ -1566,14 +1800,29 @@ pub fn run() -> Result<()> {
         },
 
         Command::Repo(c) => match c.action {
-            RepoAction::View { repo, json } => {
+            RepoAction::View { repo, json, jq } => {
                 let (o, n) = split_repo(&repo)?;
                 let v = api.repo(&o, &n)?;
-                if json {
-                    println!("{}", pretty(&v));
-                } else {
+                if !print_structured(&v, json, &jq)? {
                     print_repo_summary(&v);
+                    // TUI 式展示：摘要后跟随 README（渲染）与 LICENSE 原文
+                    if let Ok(Some(readme)) = fetch_repo_text(&api, &o, &n, "readme") {
+                        println!("\n===== README ({}) =====", readme.0);
+                        render_md(&readme.1);
+                    }
+                    if let Ok(Some(lic)) = fetch_repo_text(&api, &o, &n, "LICENSE") {
+                        println!("\n===== LICENSE ({}) =====", lic.0);
+                        println!("{}", lic.1);
+                    }
                 }
+            }
+            RepoAction::Grep { pattern, include, repo, owner, branch, ignore_case } => {
+                let (o, n) = match (&repo, &owner) {
+                    (Some(r), _) => split_repo(r)?,
+                    (None, Some(own)) => (own.clone(), pattern.clone()), // 不会走到：pattern 是位置参数
+                    (None, None) => resolve_repo(None)?,
+                };
+                run_repo_grep(&api, &o, &n, &pattern, &include, &branch, ignore_case)?;
             }
             RepoAction::List { owner } => {
                 let v = api.repos(owner.as_deref())?;
@@ -2149,10 +2398,13 @@ pub fn run() -> Result<()> {
         },
 
         Command::Issue(c) => match c.action {
-            IssueAction::List { repo, state } => {
-                let (o, n) = resolve_repo(repo)?;
+            IssueAction::List { repo, repo_pos, state, json, jq } => {
+                let (o, n) = resolve_repo(repo.or(repo_pos))?;
                 let token = web_access_token()?;
                 let v = crate::api::issue_list(&token, &o, &n, &state)?;
+                if print_structured(&v, json, &jq)? {
+                    return Ok(());
+                }
                 print_list(&v, |it| {
                     format!(
                         "#{} [{}] {}",
@@ -2162,15 +2414,40 @@ pub fn run() -> Result<()> {
                     )
                 });
             }
-            IssueAction::View { repo, number } => {
+            IssueAction::View { repo, number, json, jq } => {
                 let (o, n) = resolve_repo(repo)?;
                 let token = web_access_token()?;
                 let v = crate::api::issue_view(&token, &o, &n, number)?;
-                println!("{}", pretty(&v));
+                if !print_structured(&v, json, &jq)? {
+                    println!(
+                        "#{} [{}] {}",
+                        number,
+                        v["state"].as_str().unwrap_or("?"),
+                        v["title"].as_str().unwrap_or("(无标题)")
+                    );
+                    if let Some(a) = v["author"]["username"]
+                        .as_str()
+                        .or_else(|| v["user"]["username"].as_str())
+                    {
+                        println!("作者: {}", a);
+                    }
+                    println!();
+                    render_md(
+                        v["description"]
+                            .as_str()
+                            .or_else(|| v["body"].as_str())
+                            .unwrap_or(""),
+                    );
+                }
             }
-            IssueAction::Create { repo, title, body, attach, label, confidential } => {
+            IssueAction::Create { repo, title, body, file, attach, label, confidential } => {
                 let (o, n) = resolve_repo(repo)?;
                 let token = web_access_token()?;
+                let body = match &file {
+                    Some(f) => std::fs::read_to_string(f)
+                        .with_context(|| format!("读取正文文件 {} 失败", f))?,
+                    None => body,
+                };
                 // 标题与正文在同一个编辑器里一次填完（缺省时打开编辑器；都给了则跳过编辑器）。
                 let (title, description) = if title.is_some() && !body.is_empty() {
                     (title.unwrap(), body)
@@ -2272,9 +2549,60 @@ pub fn run() -> Result<()> {
         },
 
         Command::Pr(c) => match c.action {
-            PrAction::List { repo, state } => {
-                let (o, n) = resolve_repo(repo)?;
+            PrAction::List { repo, repo_pos, state, web, order_by, sort, page, per_page, count, json, jq } => {
+                let (o, n) = resolve_repo(repo.or(repo_pos))?;
+                if web || count {
+                    let token = web_access_token()?;
+                    if count {
+                        // 网页端统计接口一次返回全部状态：{"all":n,"opened":n,"closed":n,"merged":n,"locked":n}
+                        let v = crate::api::pr_list_count(&token, &o, &n, "all")?;
+                        if !print_structured(&v, json, &jq)? {
+                        let get = |k: &str| v[k].as_u64().unwrap_or(0);
+                        println!("all: {}", get("all"));
+                        println!("opened: {}", get("opened"));
+                        println!("merged: {}", get("merged"));
+                        println!("closed: {}", get("closed"));
+                        if v.get("locked").is_some() {
+                            println!("locked: {}", get("locked"));
+                        }
+                        }
+                    } else {
+                        let order = match order_by.as_str() {
+                            "merged_at" | "created_at" | "updated_at" => order_by.clone(),
+                            other => anyhow::bail!("order_by 只支持 updated_at / merged_at / created_at，收到：{}", other),
+                        };
+                        let v = crate::api::pr_list_web(&token, &o, &n, &state, &order, &sort, page, per_page)?;
+                        if print_structured(&v, json, &jq)? {
+                            return Ok(());
+                        }
+                        // 网页端分页包裹：{"page_num":..,"total":n,"content":[...]}
+                        let total = v["total"].as_u64().unwrap_or(0);
+                        let items = v.as_array().cloned().unwrap_or_else(|| {
+                            v["content"]
+                                .as_array()
+                                .or_else(|| v["list"].as_array())
+                                .or_else(|| v["data"].as_array())
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                        if total > 0 || !items.is_empty() {
+                            println!("共 {} 条（第 {} 页，每页 {}）", total, page, per_page);
+                        }
+                        print_list(&Value::Array(items), |it| {
+                            format!(
+                                "#{} [{}] {}",
+                                it["iid"].as_u64().or_else(|| it["number"].as_u64()).unwrap_or(0),
+                                it["state"].as_str().unwrap_or("?"),
+                                it["title"].as_str().unwrap_or("?")
+                            )
+                        });
+                    }
+                    return Ok(());
+                }
                 let v = api.pulls(&o, &n, &state)?;
+                if print_structured(&v, json, &jq)? {
+                    return Ok(());
+                }
                 print_list(&v, |it| {
                     format!(
                         "#{} [{}] {}",
@@ -2284,13 +2612,275 @@ pub fn run() -> Result<()> {
                     )
                 });
             }
-            PrAction::View { repo, number } => {
+            PrAction::Status { repo } => {
+                let (o, n) = resolve_repo(repo)?;
+                let me = api.authenticated_user()?;
+                let login = me["login"].as_str().unwrap_or("").to_string();
+                let open = api
+                    .pulls_query(&o, &n, &[("state", "open")])?
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut any = false;
+                let mut section = |label: &str, prs: Vec<Value>| -> Result<()> {
+                    if prs.is_empty() {
+                        return Ok(());
+                    }
+                    any = true;
+                    println!("{}:", label);
+                    for pr in &prs {
+                        let num = pr["number"].as_i64().unwrap_or(0);
+                        let title = pr["title"].as_str().unwrap_or("?");
+                        let head = pr["head"]["ref"]
+                            .as_str()
+                            .or_else(|| pr["source_branch"].as_str())
+                            .unwrap_or("?");
+                        let base = pr["base"]["ref"]
+                            .as_str()
+                            .or_else(|| pr["target_branch"].as_str())
+                            .unwrap_or("?");
+                        let author = pr["user"]["login"].as_str().unwrap_or("?");
+                        let draft = if pr["draft"].as_bool().unwrap_or(false) {
+                            " [草稿]"
+                        } else {
+                            ""
+                        };
+                        println!("  #{} {}{} ({} → {}, by {})", num, title, draft, head, base, author);
+                    }
+                    println!();
+                    Ok(())
+                };
+                if let Some(branch) = current_git_branch() {
+                    let cur: Vec<Value> = open
+                        .iter()
+                        .filter(|p| {
+                            p["head"]["ref"]
+                                .as_str()
+                                .or_else(|| p["source_branch"].as_str())
+                                .unwrap_or("")
+                                == branch
+                        })
+                        .cloned()
+                        .collect();
+                    section(&format!("当前分支 ({}) 的 PR", branch), cur)?;
+                }
+                section(
+                    "我创建的 PR",
+                    api.pulls_query(&o, &n, &[("state", "open"), ("author", &login)])?
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                )?;
+                section(
+                    "指派给我的 PR",
+                    api.pulls_query(&o, &n, &[("state", "open"), ("assignee", &login)])?
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                )?;
+                section(
+                    "待我评审的 PR",
+                    api.pulls_query(&o, &n, &[("state", "open"), ("reviewer", &login)])?
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default(),
+                )?;
+                if !any {
+                    println!("没有找到相关的 PR。");
+                }
+            }
+            PrAction::Checkout { repo, number } => {
+                let (o, n) = resolve_repo(repo)?;
+                let pr = api.pull(&o, &n, number)?;
+                let head = pr["head"]["ref"]
+                    .as_str()
+                    .or_else(|| pr["source_branch"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if head.is_empty() {
+                    return Err(anyhow!("无法确定 PR #{} 的源分支", number));
+                }
+                let head_repo = pr["head"]["repo"]["full_path"].as_str().unwrap_or("");
+                let same_repo = head_repo.is_empty() || head_repo == &format!("{}/{}", o, n);
+                let source: String = if same_repo {
+                    "origin".to_string()
+                } else {
+                    format!("https://gitcode.com/{}.git", head_repo)
+                };
+                git_run(&["fetch", &source, &head])?;
+                let branch = format!("pr/{}/{}", number, head);
+                git_run(&["checkout", "-B", &branch, "FETCH_HEAD"])?;
+                println!(
+                    "已检出 PR #{} → 本地分支 {}",
+                    number,
+                    branch
+                );
+            }
+            PrAction::Checks { repo, number } => {
+                let (o, n) = resolve_repo(repo)?;
+                let pr = api.pull(&o, &n, number)?;
+                println!(
+                    "#{} {}",
+                    pr["number"].as_i64().unwrap_or(number as i64),
+                    pr["title"].as_str().unwrap_or("")
+                );
+                let state = pr["state"].as_str().unwrap_or("?");
+                let draft = pr["draft"].as_bool().unwrap_or(false);
+                println!(
+                    "状态: {}",
+                    if draft {
+                        format!("{} (草稿)", state)
+                    } else {
+                        state.to_string()
+                    }
+                );
+                let ms = pr["merge_status"].as_str().unwrap_or("");
+                if !ms.is_empty() && ms != "unchecked" {
+                    println!("合并状态: {}", ms);
+                }
+                if let Some(err) = pr["merge_error"].as_str() {
+                    if !err.is_empty() {
+                        println!("合并错误: {}", err);
+                    }
+                }
+                let combined = pr["pipeline_status_with_code_quality"].as_str().unwrap_or("");
+                let pipeline = pr["pipeline_status"].as_str().unwrap_or("");
+                let cq = pr["codequality_status"].as_str().unwrap_or("");
+                if !combined.is_empty() {
+                    println!("CI 状态: {}", combined);
+                } else {
+                    if !pipeline.is_empty() {
+                        println!("流水线: {}", pipeline);
+                    }
+                    if !cq.is_empty() {
+                        println!("代码质量: {}", cq);
+                    }
+                }
+                for (label, key) in [
+                    ("评审人", "approval_merge_request_reviewers"),
+                    ("评审通过", "approval_merge_request_approvers"),
+                    ("测试人", "approval_merge_request_testers"),
+                ] {
+                    if let Some(arr) = pr.get(key).and_then(|v| v.as_array()) {
+                        if !arr.is_empty() {
+                            let parts: Vec<String> = arr
+                                .iter()
+                                .map(|r| {
+                                    let name = r["username"]
+                                        .as_str()
+                                        .or_else(|| r["login"].as_str())
+                                        .unwrap_or("?");
+                                    let st = r["state"].as_str().unwrap_or("");
+                                    if st.is_empty() {
+                                        name.to_string()
+                                    } else {
+                                        format!("{} ({})", name, st)
+                                    }
+                                })
+                                .collect();
+                            println!("{}: {}", label, parts.join(", "));
+                        }
+                    }
+                }
+                if let Some(gate) = pr["gate_check"].as_bool() {
+                    println!("门禁检查: {}", if gate { "通过" } else { "未通过/未开启" });
+                }
+                if let Some(url) = pr["html_url"].as_str().or_else(|| pr["web_url"].as_str()) {
+                    println!("链接: {}", url);
+                }
+            }
+            PrAction::Diff { repo, number, name_only } => {
+                let (o, n) = resolve_repo(repo)?;
+                let v = api.pull_files(&o, &n, number)?;
+                let files = v.as_array().cloned().unwrap_or_default();
+                let mut added = 0i64;
+                let mut removed = 0i64;
+                for f in &files {
+                    let filename = f["filename"].as_str().unwrap_or("?");
+                    let status = f["status"].as_str().unwrap_or("");
+                    let a = f["additions"].as_i64().unwrap_or(0);
+                    let d = f["deletions"].as_i64().unwrap_or(0);
+                    added += a;
+                    removed += d;
+                    if name_only {
+                        let icon = match status {
+                            "added" => "A",
+                            "deleted" => "D",
+                            "modified" => "M",
+                            "renamed" => "R",
+                            _ => "?",
+                        };
+                        println!("{} {}", icon, filename);
+                        continue;
+                    }
+                    println!("diff --git a/{} b/{}", filename, filename);
+                    println!("status: {} | +{} -{}", status, a, d);
+                    match f["patch"]["diff"].as_str().or_else(|| f["diff"].as_str()) {
+                        Some(txt) => println!("{}", txt),
+                        None => {
+                            if f["too_large"].as_bool().unwrap_or(false) {
+                                println!("(文件过大，无法显示 diff)");
+                            }
+                        }
+                    }
+                    println!();
+                }
+                if !name_only {
+                    println!("变更文件 ({}):  +{} -{}", files.len(), added, removed);
+                    if let Ok(pr) = api.pull(&o, &n, number) {
+                        if let Some(u) = pr["diff_url"].as_str() {
+                            println!("在线查看: {}", u);
+                        }
+                    }
+                }
+            }
+            PrAction::Lock { repo, number } => {
+                let (o, n) = resolve_repo(repo)?;
+                let b = json!({ "state": "locked" });
+                api.update_pull(&o, &n, number, &b)?;
+                println!("已锁定 PR #{}", number);
+            }
+            PrAction::Ready { repo, number } => {
+                let (o, n) = resolve_repo(repo)?;
+                let b = json!({ "draft": false });
+                api.update_pull(&o, &n, number, &b)?;
+                println!("PR #{} 已标记为准备评审", number);
+            }
+            PrAction::Unlock { repo, number } => {
+                let (o, n) = resolve_repo(repo)?;
+                let b = json!({ "state": "open" });
+                api.update_pull(&o, &n, number, &b)?;
+                println!("已解锁 PR #{}", number);
+            }
+            PrAction::View { repo, number, json, jq } => {
                 let (o, n) = resolve_repo(repo)?;
                 let v = api.pull(&o, &n, number)?;
-                println!("{}", pretty(&v));
+                if !print_structured(&v, json, &jq)? {
+                    println!(
+                        "#{} [{}] {}",
+                        number,
+                        v["state"].as_str().unwrap_or("?"),
+                        v["title"].as_str().unwrap_or("(无标题)")
+                    );
+                    if let Some(a) = v["user"]["login"].as_str() {
+                        println!("作者: {}", a);
+                    }
+                    if let Some(url) = v["html_url"].as_str() {
+                        println!("链接: {}", url);
+                    }
+                    println!();
+                    render_md(
+                        v["body"].as_str().or_else(|| v["description"].as_str()).unwrap_or(""),
+                    );
+                }
             }
-            PrAction::Create { repo, title, body, head, base, target_repo, patch } => {
+            PrAction::Create { repo, title, body, file, head, base, target_repo, patch } => {
                 let (o, n) = resolve_repo(repo)?;
+                let body = match &file {
+                    Some(f) => std::fs::read_to_string(f)
+                        .with_context(|| format!("读取正文文件 {} 失败", f))?,
+                    None => body,
+                };
                 // 标题与正文在同一个编辑器里一次填完。
                 let (title, body) = if title.is_some() && !body.is_empty() {
                     (title.unwrap(), body)
@@ -2394,16 +2984,29 @@ pub fn run() -> Result<()> {
                         )
                     });
                 }
-                PrCommentAction::Add { repo, number, body, path, position } => {
+                PrCommentAction::Add { repo, number, body, file, path, position, web } => {
                     let (o, n) = resolve_repo(repo)?;
-                    let v = api.create_pull_comment(
-                        &o,
-                        &n,
-                        number,
-                        &body,
-                        path.as_deref(),
-                        position,
-                    )?;
+                    let body = match &file {
+                        Some(f) => std::fs::read_to_string(f)
+                            .with_context(|| format!("读取评论文件 {} 失败", f))?,
+                        None => body,
+                    };
+                    let v = if web {
+                        if path.is_some() || position.is_some() {
+                            anyhow::bail!("--web 的普通评论接口不支持行级评论，请去掉 --path/--position 或不使用 --web");
+                        }
+                        let token = web_access_token()?;
+                        crate::api::pr_note_create(&token, &o, &n, number, &body)?
+                    } else {
+                        api.create_pull_comment(
+                            &o,
+                            &n,
+                            number,
+                            &body,
+                            path.as_deref(),
+                            position,
+                        )?
+                    };
                     println!("已评论 PR #{}（评论 id {}）", number, v["id"].as_u64().unwrap_or(0));
                 }
                 PrCommentAction::Reply { repo, number, discussion_id, body } => {
@@ -2480,6 +3083,63 @@ pub fn run() -> Result<()> {
                 let (o, n) = resolve_repo(repo)?;
                 api.test_pull(&o, &n, number, force)?;
                 println!("已对 PR #{} 提交测试通过", number);
+            }
+            PrAction::CherryPick { repo, number, branch, with_new_merge_request } => {
+                let (o, n) = resolve_repo(repo)?;
+                let token = web_access_token()?;
+                let branch = match branch {
+                    Some(b) => b,
+                    None => {
+                        // 未指定目标分支时，用 v5 查询目标仓库默认分支
+                        let r = api.repo(&o, &n)?;
+                        r["default_branch"].as_str().unwrap_or("main").to_string()
+                    }
+                };
+                let v = crate::api::pr_cherry_pick(&token, &o, &n, number, &branch, with_new_merge_request)?;
+                if let Some(mr) = v.as_object() {
+                    let iid = mr.get("iid").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let url = mr.get("web_url").and_then(|x| x.as_str()).unwrap_or("");
+                    if iid > 0 {
+                        println!("已 cherry-pick PR #{} 到 {}，新建 MR: #{} {}", number, branch, iid, url);
+                    } else {
+                        println!("已 cherry-pick PR #{} 到 {}：{}", number, branch, v);
+                    }
+                } else {
+                    println!("已 cherry-pick PR #{}：{}", number, v);
+                }
+            }
+            PrAction::Revert { repo, number, branch, with_new_merge_request } => {
+                let (o, n) = resolve_repo(repo)?;
+                let token = web_access_token()?;
+                let branch = match branch {
+                    Some(b) => b,
+                    None => {
+                        let r = api.repo(&o, &n)?;
+                        r["default_branch"].as_str().unwrap_or("main").to_string()
+                    }
+                };
+                let v = crate::api::pr_revert(&token, &o, &n, number, &branch, with_new_merge_request)?;
+                if let Some(mr) = v.as_object() {
+                    let iid = mr.get("iid").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let url = mr.get("web_url").and_then(|x| x.as_str()).unwrap_or("");
+                    if iid > 0 {
+                        println!("已 revert PR #{} 到 {}，新建 MR: #{} {}", number, branch, iid, url);
+                    } else {
+                        println!("已 revert PR #{} 到 {}：{}", number, branch, v);
+                    }
+                } else {
+                    println!("已 revert PR #{}：{}", number, v);
+                }
+            }
+            PrAction::Approval { repo, number, action, force } => {
+                let action = action.to_lowercase();
+                if action != "approve" && action != "reset" {
+                    anyhow::bail!("action 只支持 approve（通过）或 reset（撤销）");
+                }
+                let (o, n) = resolve_repo(repo)?;
+                let token = web_access_token()?;
+                crate::api::pr_approval(&token, &o, &n, number, &action, force)?;
+                println!("已{} PR #{} 的审批", if action == "approve" { "通过" } else { "撤销" }, number);
             }
             PrAction::Label(c) => match c.action {
                 PrLabelAction::Add { repo, number, labels } => {
@@ -3177,12 +3837,22 @@ pub fn run() -> Result<()> {
             println!("网页端 token 已刷新并保存到 {}", config::config_path()?.display());
         }
 
+        Command::Install { system } => {
+            run_install(system)?;
+        }
+
         Command::WebToken(c) => match c.action {
             WebTokenAction::Set => {
                 config::prompt_and_save_web_tokens()?;
                 println!("已保存网页端 token 到 {}", config::config_path()?.display());
             }
         },
+        Command::Api(a) => {
+            let token = config::load_token()?.unwrap_or_default();
+            let api = ApiClient::new(config::api_base(), if token.is_empty() { None } else { Some(token) })?;
+            let v = api.raw(&a.method, &a.path, if a.body.is_empty() { None } else { Some(&a.body) })?;
+            println!("{}", pretty(&v));
+        }
         Command::Tree(a) => run_tree(&a.repo, &a.branch)?,
         Command::Read(a) => run_read(&a.repo, &a.file, &a.branch, a.output.as_deref())?,
         Command::Download(a) => run_download(&a.repo, &a.files, &a.branch, &a.output)?,
@@ -3439,6 +4109,246 @@ fn run_read(repo: &str, file: &str, branch: &str, output: Option<&str>) -> Resul
 }
 
 /// 下载多个文件（repo download 与顶层 download 共用）
+/// `gc install` 实现：把当前运行的 gc 二进制复制到 PATH 目录。
+/// 默认 ~/.local/bin（用户级，无需权限）；--system 装到 /usr/local/bin，
+/// 非 root 时自动通过 sudo 执行复制。
+fn run_install(system: bool) -> Result<()> {
+    let src = std::env::current_exe().context("无法定位当前 gc 二进制")?;
+    let (dest_dir, need_sudo) = if system {
+        (std::path::PathBuf::from("/usr/local/bin"), true)
+    } else {
+        let home = dirs::home_dir().context("无法获取 HOME 目录")?;
+        (home.join(".local/bin"), false)
+    };
+
+    // 目标目录不存在则创建（用户目录直接建；系统目录交给 sudo 段处理）
+    if !dest_dir.exists() && !need_sudo {
+        std::fs::create_dir_all(&dest_dir).with_context(|| format!("创建 {} 失败", dest_dir.display()))?;
+    }
+    let dest = dest_dir.join("gc");
+
+    // 已装旧版时提示覆盖
+    if dest.exists() {
+        println!("覆盖已存在的 {}", dest.display());
+    }
+
+    if need_sudo {
+        // 系统级：非 root 时自动走 sudo cp，保留可执行权限
+        #[cfg(unix)]
+        let is_root = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata("/proc/self").map(|m| m.uid() == 0).unwrap_or(false)
+        };
+        #[cfg(not(unix))]
+        let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false);
+        if !is_root {
+            println!("--system 需要 root，自动执行 sudo ...");
+        }
+        // sudo -n 优先尝试免密；失败回退交互式 sudo
+        let status = std::process::Command::new("sudo")
+            .args(["cp", src.to_string_lossy().as_ref(), dest.to_string_lossy().as_ref()])
+            .status()
+            .context("执行 sudo 失败（未安装 sudo？）")?;
+        if !status.success() {
+            anyhow::bail!("sudo cp 失败");
+        }
+        let _ = std::process::Command::new("sudo")
+            .args(["chmod", "755", dest.to_string_lossy().as_ref()])
+            .status();
+    } else {
+        std::fs::copy(&src, &dest)
+            .with_context(|| format!("复制 {} -> {} 失败", src.display(), dest.display()))?;
+        // 确保可执行位
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&dest)?.permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&dest, perm)?;
+        }
+    }
+
+    println!("已安装到 {}", dest.display());
+    // PATH 提示
+    let in_path = std::env::var("PATH")
+        .map(|p| p.split(':').any(|d| std::path::Path::new(d).join("gc").exists() || d == dest_dir.to_string_lossy()))
+        .unwrap_or(false);
+    if !in_path {
+        println!("注意：{} 不在 PATH 里，请把它加入 shell 配置（如 ~/.bashrc）", dest_dir.display());
+    }
+    Ok(())
+}
+
+/// `gc repo grep` 实现：列出仓库文件 → 按 --include 通配过滤 → rayon 并行下载到临时目录
+/// → 用 grep crate（ripgrep 库版）做行级正则搜索 → 输出 file:line: text。
+fn run_repo_grep(
+    api: &ApiClient,
+    owner: &str,
+    name: &str,
+    pattern: &str,
+    include: &[String],
+    branch: &str,
+    ignore_case: bool,
+) -> Result<()> {
+    use grep::searcher::SearcherBuilder;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let token = web_access_token()?;
+    let files = crate::api::repo_file_list(&token, owner, name, branch)?;
+    if files.is_empty() {
+        anyhow::bail!("仓库 {}/{} 分支 {} 没有文件", owner, name, branch);
+    }
+    // --include 通配过滤（* 与 ?，大小写不敏感）
+    let matched: Vec<&String> = files
+        .iter()
+        .filter(|f| {
+            include.is_empty()
+                || include
+                    .iter()
+                    .any(|pat| wildcard_match(f, pat))
+        })
+        .collect();
+    if matched.is_empty() {
+        println!("（--include 过滤后没有文件）");
+        return Ok(());
+    }
+
+    // ---- 稀疏缓存下载 ----
+    // 1) v5 git trees 拿每个文件的 blob SHA；
+    // 2) 与缓存目录里的 sha 记录对比：文件存在且 SHA 未变 → 直接复用本地缓存；
+    // 3) 只下载缺失 / 有变化的文件（rayon 并行），下载后更新 SHA 记录。
+    // 缓存位于 ~/.cache/gc/grep/{owner}/{name}/{branch}/，同一分支多次 grep 时大幅减少网络量。
+    let tree = api.repo_tree_entries(owner, name, branch)?;
+    let tree_map: std::collections::HashMap<&str, &str> =
+        tree.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+
+    let cache_root = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("gc/grep")
+        .join(owner)
+        .join(name)
+        .join(branch);
+    let files_dir = cache_root.join("files");
+    let sha_file = cache_root.join("shas.json");
+    let mut cached_shas: std::collections::HashMap<String, String> = std::fs::read_to_string(&sha_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // 只保留 --include 命中的文件（稀疏：不碰仓库里其他文件）
+    let matched: Vec<&str> = tree_map
+        .keys()
+        .copied()
+        .filter(|f| include.is_empty() || include.iter().any(|pat| wildcard_match(f, pat)))
+        .collect();
+    if matched.is_empty() {
+        println!("（--include 过滤后没有文件）");
+        return Ok(());
+    }
+
+    // 分拣：缓存新鲜 vs 需要下载
+    let mut to_download: Vec<(String, String)> = Vec::new(); // (path, local_rel)
+    for f in &matched {
+        let path: &str = f;
+        let need = match cached_shas.get(path) {
+            Some(old_sha) => tree_map.get(path) != Some(&old_sha.as_str()),
+            None => true,
+        };
+        if need || !files_dir.join(path).exists() {
+            to_download.push((path.to_string(), path.to_string()));
+        }
+    }
+    if !to_download.is_empty() {
+        std::fs::create_dir_all(&files_dir).context("创建 grep 缓存目录失败")?;
+        eprintln!(
+            "下载 {} / {} 个文件（其余命中缓存，未变化跳过）...",
+            to_download.len(),
+            matched.len()
+        );
+        let results = crate::api::download_files(&token, owner, name, branch, &to_download, &files_dir)?;
+        for (path, r) in &results {
+            if let Err(e) = r {
+                eprintln!("警告：{} 下载失败（{}），跳过", path, e);
+            }
+        }
+        // 更新 SHA 记录（只记成功下载的；缓存里多出来的旧记录顺手清掉）
+        for (path, r) in &results {
+            if r.is_ok() {
+                if let Some(sha) = tree_map.get(path.as_str()) {
+                    cached_shas.insert(path.clone(), sha.to_string());
+                }
+            }
+        }
+        let keep: std::collections::HashSet<&str> = matched.iter().copied().collect();
+        cached_shas.retain(|k, _| keep.contains(k.as_str()));
+        std::fs::write(&sha_file, serde_json::to_string(&cached_shas)?)
+            .context("写入 grep 缓存 SHA 记录失败")?;
+    }
+
+    // 在缓存目录上执行搜索（此时所有 matched 文件都已在 files_dir 下且与远端一致）
+
+    let matcher = grep::regex::RegexMatcherBuilder::new()
+        .case_insensitive(ignore_case)
+        .build(pattern)
+        .map_err(|e| anyhow!("正则表达式无效：{}", e))?;
+    let mut searcher = grep::searcher::SearcherBuilder::new()
+        .binary_detection(grep::searcher::BinaryDetection::quit(b'\x00'))
+        .line_number(true)
+        .build();
+
+    let file_count = AtomicUsize::new(0);
+    for path in &matched {
+        let local = files_dir.join(path);
+        let content = match std::fs::read(&local) {
+            Ok(c) => c,
+            Err(_) => continue, // 缓存缺失（极少见：下载失败），跳过
+        };
+        let path_str = path.to_string();
+        let matched_any = AtomicUsize::new(0);
+        searcher
+            .search_slice(
+                &matcher,
+                &content,
+                grep::searcher::sinks::UTF8(|line_no, line| {
+                    matched_any.fetch_add(1, Ordering::Relaxed);
+                    let text = line.trim_end_matches(['\n', '\r']);
+                    println!("{}:{}: {}", path_str, line_no, text);
+                    Ok(true)
+                }),
+            )
+            .with_context(|| format!("搜索 {} 失败", path))?;
+        if matched_any.load(Ordering::Relaxed) > 0 {
+            file_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let files_hit = file_count.load(Ordering::Relaxed);
+    println!();
+    println!("（{} 个文件命中，缓存：{}）", files_hit, files_dir.display());
+    Ok(())
+}
+
+/// 极简通配符匹配（支持 * 与 ?，大小写不敏感），用于 --include 过滤
+fn wildcard_match(s: &str, pattern: &str) -> bool {
+    fn inner(s: &[u8], p: &[u8]) -> bool {
+        if p.is_empty() {
+            return s.is_empty();
+        }
+        match p[0] {
+            b'*' => {
+                for i in 0..=s.len() {
+                    if inner(&s[i..], &p[1..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            b'?' => !s.is_empty() && inner(&s[1..], &p[1..]),
+            c => !s.is_empty() && s[0].eq_ignore_ascii_case(&c) && inner(&s[1..], &p[1..]),
+        }
+    }
+    inner(s.as_bytes(), pattern.to_lowercase().as_bytes())
+}
+
 fn run_download(repo: &str, files: &[String], branch: &str, output: &str) -> Result<()> {
     if files.is_empty() {
         anyhow::bail!("请至少指定一个要下载的文件");
@@ -3517,6 +4427,8 @@ fn link_upstream_remote(repo: &str) -> Result<()> {
 
 /// owner/name -> (owner, name)
 pub(crate) fn split_repo(s: &str) -> Result<(String, String)> {
+    // 允许直接传入 URL（https://host/owner/repo 或 git@host:owner/repo）
+    let s = parse_gitcode_repo(s).unwrap_or_else(|| s.to_string());
     let mut it = s.splitn(2, '/');
     let o = it.next().ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
     let n = it.next().ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
@@ -3554,6 +4466,36 @@ fn detect_repo_from_cwd() -> Option<String> {
     parse_gitcode_repo(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// 当前所在 git 分支（非 git 仓库或游离 HEAD 时返回 None）
+fn current_git_branch() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() || s == "HEAD" {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 运行 git 命令，失败时返回带 stderr 的错误
+fn git_run(args: &[&str]) -> Result<()> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| anyhow!("运行 git 失败: {}", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(anyhow!("git {} 失败: {}", args.join(" "), err));
+    }
+    Ok(())
+}
+
 /// 参数给了就用参数，否则从当前目录的 git remote 推断。
 /// `pub(crate)` 以便 MCP 工具也能复用（与 CLI 行为一致）。
 pub(crate) fn resolve_repo(repo: Option<String>) -> Result<(String, String)> {
@@ -3568,14 +4510,22 @@ pub(crate) fn resolve_repo(repo: Option<String>) -> Result<(String, String)> {
 
 fn parse_gitcode_repo(url: &str) -> Option<String> {
     let u = url.trim();
-    let stripped = if let Some(r) = u.strip_prefix("https://gitcode.com/") {
-        r
-    } else if let Some(r) = u.strip_prefix("http://gitcode.com/") {
-        r
-    } else if let Some(r) = u.strip_prefix("git@gitcode.com:") {
-        r
+    // 支持 gitcode.com / atomgit.com 等任意主机的三种形式：
+    // https://host/owner/repo(.git)、git@host:owner/repo(.git)、owner/repo
+    let stripped = if let Some(p) = u.find("://") {
+        // 去掉 scheme://host[:port]/，只留路径
+        let rest = &u[p + 3..];
+        match rest.find('/') {
+            Some(i) => &rest[i + 1..],
+            None => return None,
+        }
+    } else if let Some(r) = u.strip_prefix("git@") {
+        match r.find(':') {
+            Some(i) => &r[i + 1..],
+            None => return None,
+        }
     } else {
-        return None;
+        u
     };
     let repo = stripped.strip_suffix(".git").unwrap_or(stripped);
     if repo.contains('/') {
@@ -3589,6 +4539,103 @@ fn parse_gitcode_repo(url: &str) -> Option<String> {
 fn read_as_base64(path: &str) -> Result<String> {
     let bytes = std::fs::read(path).map_err(|e| anyhow!("读取 {} 失败: {}", path, e))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// 结构化输出助手：给了 --jq 则执行 jq 表达式，给了 --json 则打印完整 JSON。
+/// 返回 true 表示已输出（调用方跳过默认文本输出）。
+fn print_structured(v: &Value, json: bool, jq: &Option<String>) -> Result<bool> {
+    if let Some(f) = jq {
+        print!("{}", run_jq(f, v)?);
+        return Ok(true);
+    }
+    if json {
+        println!("{}", pretty(v));
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// 拉取仓库单个文本文件（v5）：
+/// - "readme" 走 /repos/{o}/{n}/readme（自动识别 README 文件名）
+/// - 其他值走 /repos/{o}/{n}/contents/{path}
+/// 返回 (路径/文件名, 解码后的 UTF-8 文本)；文件不存在返回 Ok(None)。
+fn fetch_repo_text(
+    api: &ApiClient,
+    owner: &str,
+    name: &str,
+    what: &str,
+) -> Result<Option<(String, String)>> {
+    let path = if what == "readme" {
+        format!("/repos/{}/{}/readme", owner, name)
+    } else {
+        format!("/repos/{}/{}/contents/{}", owner, name, what)
+    };
+    let v = match api.get(&path, &[]) {
+        Ok(v) => v,
+        // 404 = 仓库没有该文件，属正常情况
+        Err(e) if e.to_string().contains("404") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let file_name = v["name"].as_str().or_else(|| v["path"].as_str()).unwrap_or(what).to_string();
+    let content = match v["content"].as_str() {
+        Some(c) => {
+            let cleaned: String = c.chars().filter(|ch| !ch.is_whitespace()).collect();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(cleaned.as_bytes())
+                .map_err(|e| anyhow!("base64 解码失败：{}", e))?;
+            String::from_utf8_lossy(&bytes).to_string()
+        }
+        // 部分接口对大文件返回空 content + 下载链接，此时不展示正文
+        None => return Ok(None),
+    };
+    Ok(Some((file_name, content)))
+}
+
+/// 用 termimad 把 Markdown 渲染到终端（空文本跳过）。
+fn render_md(md: &str) {
+    if md.trim().is_empty() {
+        return;
+    }
+    let skin = termimad::MadSkin::default();
+    skin.print_text(md);
+}
+
+/// 用 jaq 对 JSON 值执行 jq 表达式，返回每个输出一行（JSON 格式）。
+fn run_jq(filter: &str, input: &Value) -> Result<String> {
+    use jaq_core::load::{Arena, File, Loader};
+    use jaq_core::{Compiler, Ctx, Vars};
+
+    let program = File { code: filter, path: () };
+    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
+    let funs = jaq_core::funs::<jaq_core::data::JustLut<jaq_json::Val>>()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
+    let loader = Loader::new(defs);
+    let arena = Arena::default();
+    let modules = loader
+        .load(&arena, program)
+        .map_err(|e| anyhow!("jq 表达式解析失败：{:?}", e))?;
+    let compiled = Compiler::default()
+        .with_funs(funs)
+        .compile(modules)
+        .map_err(|e| anyhow!("jq 表达式编译失败：{:?}", e))?;
+    // jaq-json 的 Val 与 serde_json::Value 之间没有直接转换，走 JSON 字符串
+    let json_str = serde_json::to_string(input)?;
+    let val = jaq_json::read::parse_single(json_str.as_bytes())
+        .map_err(|e| anyhow!("输入解析失败：{}", e))?;
+    let ctx = Ctx::<jaq_core::data::JustLut<jaq_json::Val>>::new(&compiled.lut, Vars::new([]));
+    let mut out = String::new();
+    for r in compiled.id.run((ctx, val)) {
+        match r {
+            Ok(v) => {
+                let s = format!("{}", v);
+                out.push_str(&s);
+                out.push('\n');
+            }
+            Err(e) => return Err(anyhow!("jq 执行失败：{:?}", e)),
+        }
+    }
+    Ok(out)
 }
 
 fn pretty(v: &Value) -> String {
@@ -3858,10 +4905,7 @@ fn build_node(node: &Node, prefix: &str, out: &mut String) {
 /// 保证脚本场景仍然可用。用于 `gc issue edit` / `create` / `reply`、`pr create`、
 /// `release create` 等需要正文（以及标题）输入的场景。
 fn edit_text(initial: &str) -> Result<String> {
-    if !std::io::stdout().is_terminal() {
-        return edit_text_external(initial);
-    }
-    edit_text_libreditor(initial)
+    edit_text_external(initial)
 }
 
 /// 在**同一个**编辑器会话里同时编辑标题（首行）与正文（其余内容），
@@ -3897,108 +4941,6 @@ fn edit_text_external(initial: &str) -> Result<String> {
     let text = std::fs::read_to_string(&path).map_err(|e| anyhow!("读回临时文件失败: {}", e))?;
     let _ = std::fs::remove_file(&path);
     Ok(text)
-}
-
-/// 内嵌 libreditor 全屏编辑器：打开一个临时文件作为缓冲区，跑事件循环，
-/// 退出后直接读取内存中的缓冲区文本返回（因此即使 `:qa` 强制退出也不会丢内容）。
-fn edit_text_libreditor(initial: &str) -> Result<String> {
-    use crossterm::cursor::Show;
-    use crossterm::execute;
-    use crossterm::terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-    };
-    use libreditor::editor::Editor;
-    use libreditor::ui::Surface;
-    use std::io::{stdout, Write};
-
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("gc-edit-{}.md", std::process::id()));
-    std::fs::write(&path, initial).map_err(|e| anyhow!("写入临时文件失败: {}", e))?;
-
-    let mut stdout = stdout();
-    enable_raw_mode().map_err(|e| anyhow!("进入 raw 模式失败: {e}"))?;
-    let _ = execute!(stdout, EnterAlternateScreen);
-
-    let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-    let mut surface = Surface::new(w as usize, h as usize);
-    let mut previous = Surface::new(w as usize, h as usize);
-
-    let mut editor = Editor::new();
-    if let Err(e) = editor.open(&path) {
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout, Show, LeaveAlternateScreen);
-        return Err(anyhow!("打开编辑器缓冲区失败: {e}"));
-    }
-    // 让 :q / :wq 都能干净退出：内容以内存中的缓冲区为准，退出后直接读取。
-    editor.buffer_mut().history.clear();
-
-    editor.render(&mut surface);
-    surface.render(&mut stdout, None).map_err(|e| anyhow!("{e}"))?;
-    stdout.flush().map_err(|e| anyhow!("{e}"))?;
-
-    let run = run_libreditor(&mut editor, &mut stdout, &mut surface, &mut previous, w as usize, h as usize);
-
-    let _ = disable_raw_mode();
-    let _ = execute!(stdout, Show, LeaveAlternateScreen);
-
-    run?;
-    let text = editor.buffer().slice().to_string();
-    let _ = std::fs::remove_file(&path);
-    Ok(text)
-}
-
-/// libreditor 事件循环：读事件 → 喂给 `Editor::handle_event` → 渲染 → 差分输出，
-/// 直到 `should_quit`。与 `reditor` 二进制的循环一致。
-fn run_libreditor(
-    editor: &mut libreditor::editor::Editor,
-    stdout: &mut std::io::Stdout,
-    surface: &mut libreditor::ui::Surface,
-    previous: &mut libreditor::ui::Surface,
-    _width: usize,
-    _height: usize,
-) -> Result<()> {
-    use crossterm::cursor::{MoveTo, SetCursorStyle};
-    use crossterm::event::{self, Event as CtEvent};
-    use crossterm::execute;
-    use libreditor::editor::CursorShape;
-    use libreditor::input::Event;
-    use std::io::Write;
-    use std::time::Duration;
-
-    loop {
-        if editor.should_quit {
-            return Ok(());
-        }
-
-        editor.render(surface);
-        surface.render(stdout, Some(previous)).map_err(|e| anyhow!("{e}"))?;
-        if let Some((x, y)) = editor.cursor_position() {
-            let _ = execute!(stdout, MoveTo(x, y));
-        }
-        let style = match editor.cursor_shape() {
-            CursorShape::Block => SetCursorStyle::SteadyBlock,
-            CursorShape::Bar => SetCursorStyle::SteadyBar,
-            CursorShape::Underline => SetCursorStyle::SteadyUnderScore,
-        };
-        let _ = execute!(stdout, style);
-        stdout.flush().map_err(|e| anyhow!("{e}"))?;
-
-        // `surface` 现在是最新一帧，挪到 `previous` 当下一帧参照；复用旧帧当缓冲。
-        std::mem::swap(surface, previous);
-
-        if event::poll(Duration::from_millis(120))? {
-            let ct: CtEvent = event::read()?;
-            if let Some(ev) = Event::from_crossterm(ct) {
-                if let Event::Resize(nw, nh) = ev {
-                    surface.resize(nw as usize, nh as usize);
-                    previous.resize(nw as usize, nh as usize);
-                }
-                if let Err(e) = editor.handle_event(ev) {
-                    editor.set_error(e.to_string());
-                }
-            }
-        }
-    }
 }
 
 /// 获取可用于讨论接口的 access token：

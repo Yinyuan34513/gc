@@ -75,6 +75,39 @@ impl ApiClient {
         Ok(Self { base, token, client })
     }
 
+    /// 从错误文本里抹掉 access_token（reqwest 的 URL 错误会把带 token 的完整链接打出来）。
+    fn redact_token(s: &str) -> String {
+        // 匹配 access_token=<任意非空白、非引号、非> 字符>
+        let re = regex::Regex::new(r#"access_token=[^\s"'&<>]+"#).unwrap();
+        re.replace_all(s, "access_token=***").to_string()
+    }
+
+    /// 带自动重试的发送：网络类失败（连接超时/重置等）按 500ms → 1s → 2s 退避共试 3 次；
+    /// 服务端已返回响应（4xx/5xx）不重试。错误文本统一脱敏 access_token。
+    fn send_with_retry(
+        builder: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response> {
+        let mut last_err = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(500 * (1 << (attempt - 1))));
+            }
+            let b = builder
+                .try_clone()
+                .ok_or_else(|| anyhow!("请求体无法克隆，无法重试"))?;
+            match b.send() {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(anyhow!(
+            "请求 GitCode API 失败（已重试 3 次）: {}",
+            Self::redact_token(&last_err.unwrap().to_string())
+        ))
+    }
+
     /// 统一请求：自动附加 access_token，支持额外 query 与 JSON body
     pub fn request(
         &self,
@@ -95,7 +128,7 @@ impl ApiClient {
         if let Some(b) = body {
             builder = builder.json(b);
         }
-        let resp = builder.send().context("请求 GitCode API 失败")?;
+        let resp = Self::send_with_retry(builder)?;
         let status = resp.status();
         let text = resp.text().context("读取响应体失败")?;
         if !status.is_success() {
@@ -109,6 +142,21 @@ impl ApiClient {
 
     pub fn get(&self, path: &str, q: &[(&str, &str)]) -> Result<Value> {
         self.request(reqwest::Method::GET, path, q, None)
+    }
+
+    /// 裸 API 透传（gc api 子命令）：method 任意、path 相对 v5 base（可带 query）、
+    /// body 为原始 JSON 字符串。返回解析后的 JSON（空响应返回 Null）。
+    pub fn raw(&self, method: &str, path: &str, body: Option<&str>) -> Result<Value> {
+        let m = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+            .map_err(|e| anyhow!("无效的 HTTP 方法 {}: {}", method, e))?;
+        let parsed_body = match body {
+            Some(s) if !s.trim().is_empty() => {
+                Some(serde_json::from_str::<Value>(s)
+                    .map_err(|e| anyhow!("-b 的内容不是合法 JSON：{}", e))?)
+            }
+            _ => None,
+        };
+        self.request(m, path, &[], parsed_body.as_ref())
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -400,15 +448,48 @@ impl ApiClient {
     // ---- Issue ----
     // ---- Pull Request ----
     pub fn pulls(&self, owner: &str, name: &str, state: &str) -> Result<Value> {
+        // v5 接口 state 枚举只认 open/closed/all，归一化常见变体
+        let lower = state.to_lowercase();
+        let st = match lower.as_str() {
+            "close" | "closed" => "closed",
+            "opened" => "open",
+            other => other,
+        };
         self.get(
             &format!("/repos/{}/{}/pulls", owner, name),
-            &[("state", state)],
+            &[("state", st)],
         )
+    }
+
+    /// 带任意过滤参数的 PR 列表（author / assignee / reviewer / base 等）
+    pub fn pulls_query(&self, owner: &str, name: &str, q: &[(&str, &str)]) -> Result<Value> {
+        self.get(&format!("/repos/{}/{}/pulls", owner, name), q)
     }
 
     pub fn pull(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
         self.get(&format!("/repos/{}/{}/pulls/{}", owner, name, num), &[])
     }
+
+    /// 递归列出仓库文件树（v5 git trees）：返回 (path, sha)（仅 blob 文件，不含目录）。
+    /// 用于 repo grep 的稀疏缓存：与本地缓存 SHA 对比后只下载有变化的文件。
+    pub fn repo_tree_entries(&self, owner: &str, name: &str, ref_name: &str) -> Result<Vec<(String, String)>> {
+        let v = self.get(
+            &format!("/repos/{}/{}/git/trees/{}", owner, name, ref_name),
+            &[("recursive", "1")],
+        )?;
+        let mut out = Vec::new();
+        if let Some(arr) = v["tree"].as_array() {
+            for e in arr {
+                if e["type"].as_str() == Some("blob") {
+                    if let (Some(p), Some(s)) = (e["path"].as_str(), e["sha"].as_str()) {
+                        out.push((p.to_string(), s.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
 
     pub fn create_pull(
         &self,
@@ -825,7 +906,7 @@ impl ApiClient {
         if !extra_q.is_empty() {
             builder = builder.query(extra_q);
         }
-        let resp = builder.send().context("请求 GitCode API 失败")?;
+        let resp = Self::send_with_retry(builder)?;
         let status = resp.status();
         let text = resp.text().context("读取响应体失败")?;
         if !status.is_success() {
@@ -2064,6 +2145,8 @@ pub fn download_files(
     files: &[(String, String)],
     out_dir: &std::path::Path,
 ) -> Result<Vec<(String, Result<(u64, bool)>)>> {
+    use rayon::prelude::*;
+
     let client = Arc::new(web_client()?);
     let token = token.to_string();
     let owner = owner.to_string();
@@ -2071,31 +2154,17 @@ pub fn download_files(
     let r#ref = r#ref.to_string();
     let out_dir = out_dir.to_path_buf();
 
-    let mut handles = Vec::new();
-    for (api_path, local_path) in files {
-        let client = Arc::clone(&client);
-        let (token, owner, name, r#ref, out_dir, api_path, local_path) = (
-            token.clone(),
-            owner.clone(),
-            name.clone(),
-            r#ref.clone(),
-            out_dir.clone(),
-            api_path.clone(),
-            local_path.clone(),
-        );
-        let h = std::thread::spawn(move || {
+    // rayon 全局线程池并行下载：线程数由池管理（默认 CPU 核数），
+    // 不会随文件数量爆炸；par_iter 结果自动保持与输入一致的顺序。
+    let results: Vec<(String, Result<(u64, bool)>)> = files
+        .par_iter()
+        .map(|(api_path, local_path)| {
             let res = download_one(
-                &client, &token, &owner, &name, &r#ref, &api_path, &local_path, &out_dir,
+                &client, &token, &owner, &name, &r#ref, api_path, local_path, &out_dir,
             );
-            (api_path, res)
-        });
-        handles.push(h);
-    }
-
-    let mut results = Vec::with_capacity(handles.len());
-    for h in handles {
-        results.push(h.join().map_err(|_| anyhow!("下载线程崩溃"))?);
-    }
+            (api_path.clone(), res)
+        })
+        .collect();
     Ok(results)
 }
 
@@ -2603,6 +2672,274 @@ pub fn issue_reopen(token: &str, owner: &str, name: &str, iid: u64) -> Result<Va
         return Err(anyhow!("GitCode 重新打开 Issue 接口错误 {}: {}", status, text));
     }
     serde_json::from_str(&text).context("解析重新打开 Issue 响应失败")
+}
+
+/// Cherry-pick 一个已合并的 PR（网页端接口）：POST /issuepr/api/v1/projects/{owner%2Fname}/merge_request/{iid}/cherry_pick
+/// body 逆向自网页请求：{"repoId":"owner%2Fname","iid":n,"branch":"main","with_new_merge_request":true}。
+/// 返回服务器 JSON（新建的 MR 信息或提示文本）。
+pub fn pr_cherry_pick(
+    token: &str,
+    owner: &str,
+    name: &str,
+    iid: u64,
+    branch: &str,
+    with_new_merge_request: bool,
+) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body = serde_json::json!({
+        "repoId": path_seg,
+        "iid": iid,
+        "branch": branch,
+        "with_new_merge_request": with_new_merge_request,
+    });
+    let url = format!(
+        "{}/issuepr/api/v1/projects/{}/merge_request/{}/cherry_pick",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/pull/{}", repo_path, iid);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&body)
+        .send()
+        .context("请求 GitCode cherry-pick 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode cherry-pick 接口错误 {}: {}", status, text));
+    }
+    Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text.trim().to_string())))
+}
+
+/// Revert 一个已合并的 PR（网页端接口）：POST /issuepr/api/v1/projects/{owner%2Fname}/merge_request/{iid}/revert
+/// body 与 cherry-pick 相同：{"repoId":"owner%2Fname","iid":n,"branch":"main","with_new_merge_request":true}。
+pub fn pr_revert(
+    token: &str,
+    owner: &str,
+    name: &str,
+    iid: u64,
+    branch: &str,
+    with_new_merge_request: bool,
+) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body = serde_json::json!({
+        "repoId": path_seg,
+        "iid": iid,
+        "branch": branch,
+        "with_new_merge_request": with_new_merge_request,
+    });
+    let url = format!(
+        "{}/issuepr/api/v1/projects/{}/merge_request/{}/revert",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/pull/{}", repo_path, iid);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&body)
+        .send()
+        .context("请求 GitCode revert 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode revert 接口错误 {}: {}", status, text));
+    }
+    Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text.trim().to_string())))
+}
+
+/// 提交 / 撤销 PR 审批（网页端接口）：PUT /issuepr/api/v1/projects/{owner%2Fname}/merge_requests/{iid}/approval
+/// action_type 为 "approve"（通过）或 "reset"（撤销）。body 逆向自网页请求：
+/// {"repoId":"owner%2Fname","iid":n,"action_type":"approve","force":false}。
+pub fn pr_approval(
+    token: &str,
+    owner: &str,
+    name: &str,
+    iid: u64,
+    action_type: &str,
+    force: bool,
+) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body = serde_json::json!({
+        "repoId": path_seg,
+        "iid": iid,
+        "action_type": action_type,
+        "force": force,
+    });
+    let url = format!(
+        "{}/issuepr/api/v1/projects/{}/merge_requests/{}/approval",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/pull/{}", repo_path, iid);
+    let resp = client
+        .put(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&body)
+        .send()
+        .context("请求 GitCode PR 审批接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode PR 审批接口错误 {}: {}", status, text));
+    }
+    Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text.trim().to_string())))
+}
+
+/// 列出 PR（网页端接口）：GET /issuepr/api/v1/projects/{owner%2Fname}/isource/merge_requests
+/// 查询参数逆向自网页请求：sort、order_by（updated_at/merged_at/created_at）、scope=all、
+/// state（opened/merged/closed）、page、repoId（owner%2Fname 双重编码即 %252F）、per_page、view=basic。
+pub fn pr_list_web(
+    token: &str,
+    owner: &str,
+    name: &str,
+    state: &str,
+    order_by: &str,
+    sort: &str,
+    page: u64,
+    per_page: u64,
+) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // 路径段：owner%2Fname
+    let repo_id = repo_path.replace('/', "%252F"); // 查询参数 repoId：双重编码
+    let st = if state.eq_ignore_ascii_case("open") {
+        "opened"
+    } else if state.eq_ignore_ascii_case("close") || state.eq_ignore_ascii_case("closed") {
+        "closed"
+    } else {
+        state
+    };
+    let url = format!(
+        "{}/issuepr/api/v1/projects/{}/isource/merge_requests?sort={}&order_by={}&scope=all&state={}&page={}&repoId={}&per_page={}&group_id&view=basic",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        sort,
+        order_by,
+        st,
+        page,
+        repo_id,
+        per_page,
+    );
+    let page_ref = format!("https://gitcode.com/{}/pulls", repo_path);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .send()
+        .context("请求 GitCode PR 列表（网页端）接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode PR 列表（网页端）接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析 PR 列表（网页端）响应失败")
+}
+
+/// 统计各状态 PR 数量（网页端接口）：GET /issuepr/api/v1/projects/{owner%2Fname}/isource/merge_requests/count
+/// 带 only_count=true，返回 {"count": n} 之类的计数 JSON。state 支持 all/merged/closed/opened。
+pub fn pr_list_count(token: &str, owner: &str, name: &str, state: &str) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // 路径段：owner%2Fname
+    let repo_id = repo_path.replace('/', "%252F"); // 查询参数 repoId：双重编码
+    let st = if state.eq_ignore_ascii_case("open") {
+        "opened"
+    } else if state.eq_ignore_ascii_case("close") || state.eq_ignore_ascii_case("closed") {
+        "closed"
+    } else {
+        state
+    };
+    let url = format!(
+        "{}/issuepr/api/v1/projects/{}/isource/merge_requests/count?sort=desc&order_by=updated_at&scope=all&state={}&page=1&repoId={}&per_page=1&group_id&view=basic&only_count=true",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        st,
+        repo_id,
+    );
+    let page_ref = format!("https://gitcode.com/{}/pulls", repo_path);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .send()
+        .context("请求 GitCode PR 统计（网页端）接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode PR 统计（网页端）接口错误 {}: {}", status, text));
+    }
+    serde_json::from_str(&text).context("解析 PR 统计（网页端）响应失败")
+}
+
+/// 在 PR 下发表评论（网页端接口）：POST /issuepr/api/v1/projects/{owner%2Fname}/merge_request/{iid}/notes
+/// body 逆向自网页请求：{"body":"...","need_to_resolve":false}。
+pub fn pr_note_create(token: &str, owner: &str, name: &str, iid: u64, body: &str) -> Result<Value> {
+    let client = web_client()?;
+    let repo_path = format!("{}/{}", owner, name);
+    let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
+    let body_json = serde_json::json!({ "body": body, "need_to_resolve": false });
+    let url = format!(
+        "{}/issuepr/api/v1/projects/{}/merge_request/{}/notes",
+        web_base().trim_end_matches('/'),
+        path_seg,
+        iid,
+    );
+    let page_ref = format!("https://gitcode.com/{}/pull/{}", repo_path, iid);
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("Content-Type", "application/json")
+        .header("page-ref", &page_ref)
+        .header("page-uri", &page_ref)
+        .json(&body_json)
+        .send()
+        .context("请求 GitCode PR 评论接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode PR 评论接口错误 {}: {}", status, text));
+    }
+    Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text.trim().to_string())))
 }
 
 /// 回复 Issue（网页端 v2）：POST /issuepr/api/v1/issue/{owner%2Fname}/issues/{iid}/notes

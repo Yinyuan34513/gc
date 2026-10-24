@@ -70,6 +70,15 @@ pub fn prompt_and_save_token() -> Result<String> {
     if token.is_empty() {
         anyhow::bail!("token 为空，已取消");
     }
+    save_token(&token)
+}
+
+/// 保存 API token 到 ~/.config/gitcode.toml（保留其它字段，非交互）。
+/// 返回读取到的 token，便于调用方立即做有效性验证。
+pub fn save_token(token: &str) -> Result<String> {
+    if token.trim().is_empty() {
+        anyhow::bail!("token 为空，已取消");
+    }
 
     let path = config_path()?;
     let mut cfg: TomlConfig = if path.exists() {
@@ -87,7 +96,7 @@ pub fn prompt_and_save_token() -> Result<String> {
             web_refresh: None,
         }
     };
-    cfg.token = Some(token.clone());
+    cfg.token = Some(token.trim().to_string());
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -97,7 +106,7 @@ pub fn prompt_and_save_token() -> Result<String> {
     std::fs::write(&path, body)
         .map_err(|e| anyhow!("写入 {} 失败: {}", path.display(), e))?;
 
-    Ok(token)
+    Ok(token.trim().to_string())
 }
 
 #[cfg(test)]
