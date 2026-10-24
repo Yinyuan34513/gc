@@ -42,7 +42,7 @@
 | 仓库内容搜索 | ✅ `repo grep`（ripgrep 库 + SHA 稀疏缓存） | ❌ |
 | 裸 API 透传 | ✅ `gc api -m/-p/-b` | ❌ |
 | 自我安装 | ✅ `gc install [--system]`（非 root 自动 sudo） | ❌ |
-| AI 集成 | ✅ 内置 MCP server（运行时协议） | ✅ `gcl skill add`（静态技能文件） |
+| AI 集成 | ✅ 内置 MCP server（运行时协议）+ `gc skill install`（自动检测 Claude Code / Codex / OpenCode / CodeBuddy / Gemini CLI / AtomCode 六个工具写入技能文件，`skill list` 查看状态，顶层别名 `extension`） | ✅ `gcl skill add`（静态技能文件，支持 --all） |
 
 ## 四、输出与体验
 
