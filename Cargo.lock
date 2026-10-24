@@ -771,16 +771,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gc-cli",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "gc-cli"
 version = "0.1.0"
 dependencies = [
@@ -941,6 +931,16 @@ dependencies = [
  "r-efi",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "gitcode-gc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gc-cli",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

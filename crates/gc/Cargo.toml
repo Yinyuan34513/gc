@@ -1,6 +1,6 @@
 [package]
-name = "gc"
-description = "GitCode (AtomGit) 命令行工具，类似 gh"
+name = "gitcode-gc"
+description = "GitCode (AtomGit) 命令行工具，类似 gh（提供 gc 命令）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

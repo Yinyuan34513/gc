@@ -18,6 +18,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://gitcode.com/ghhhJoshrjnrhr/gc"
+readme = "README.md"
+keywords = ["gitcode", "atomgit", "cli", "git", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -31,13 +34,13 @@ regex = "1.13.1"
 rayon = "1.12.0"
 tokio = { version = "1.40", features = ["full"] }
 
-# 内部 crate
-gc-core = { path = "crates/gc-core" }
-gc-cli = { path = "crates/gc-cli" }
-gc-mcp = { path = "crates/gc-mcp" }
-gc-repo = { path = "crates/gc-repo" }
-gc-pr = { path = "crates/gc-pr" }
-gc-issues = { path = "crates/gc-issues" }
-gc-grep = { path = "crates/gc-grep" }
-gc-search = { path = "crates/gc-search" }
-gc-skill = { path = "crates/gc-skill" }
+# 内部 crate（version 供 crates.io 发布时把 path 依赖替换为 registry 依赖）
+gc-core = { path = "crates/gc-core", version = "0.1.0" }
+gc-cli = { path = "crates/gc-cli", version = "0.1.0" }
+gc-mcp = { path = "crates/gc-mcp", version = "0.1.0" }
+gc-repo = { path = "crates/gc-repo", version = "0.1.0" }
+gc-pr = { path = "crates/gc-pr", version = "0.1.0" }
+gc-issues = { path = "crates/gc-issues", version = "0.1.0" }
+gc-grep = { path = "crates/gc-grep", version = "0.1.0" }
+gc-search = { path = "crates/gc-search", version = "0.1.0" }
+gc-skill = { path = "crates/gc-skill", version = "0.1.0" }
