@@ -2,17 +2,18 @@
 
 > 对比对象：**gc**（本项目）与 **gcl**（[jliu666/gitcode-cli](https://atomgit.com/jliu666/gitcode-cli)）。
 > 两者都是 Rust 编写、对标 GitHub CLI (`gh`) 的 GitCode 命令行工具。
-> 更新日期：2026-10-24。
+> 更新日期：2026-10-25。
 
 ## 一、工程规模
 
 | 指标 | gc | gcl |
 |---|---|---|
-| 代码量 | ~13,000 行（api.rs + cli.rs + auth.rs + mcp/） | 4,267 行（13 文件） |
-| 测试 | 72 | 47 |
+| 代码量 | ~15,900 行（25 文件） | 4,267 行（13 文件） |
+| 测试 | 78（67 单元 + 11 MCP stdio 集成） | 47 |
 | 运行模型 | blocking reqwest + rustls（编译稳、无 tokio 运行时） | async reqwest 0.13 + tokio |
-| 代码组织 | api.rs / cli.rs 偏大文件 | commands/ 按域拆分（结构更清晰） |
+| 代码组织 | Cargo workspace 按域拆 10 个 crate（gc-core 公共层 / gc-cli 命令行层 / gc-repo、gc-pr、gc-issues、gc-grep、gc-search、gc-skill 域层 / gc-mcp / gc 主包） | commands/ 按域拆分（单 crate） |
 | 许可 | MIT（+ oh-gc 移植部分单独 LICENSE） | MIT |
+| 分发 | **crates.io 已发布**：`cargo install gitcode-gc`（主包 + 9 个库 crate，0.1.1） | 未发布 |
 
 ## 二、认证与凭据
 
@@ -23,6 +24,7 @@
 | **git 凭据自动配置** | ✅ `gc auth git`：注册为 gitcode.com / atomgit.com 的 credential helper，HTTPS push/pull/clone 全免密 | ❌ |
 | 直接输出 token | ✅ `gc auth pal`（可管道：`export GIT_TOKEN=$(gc auth pal)`） | ❌ |
 | 错误信息脱敏 token | ✅ `access_token=***` | ❌ |
+| **OAuth broker 扫码登录** | ✅ `gc auth login --qr [--broker URL]`（终端 Unicode 二维码 + 轮询授权 + 换 PAT；broker 地址取 `--broker` > `GITCODE_BROKER`，契约与 lming112/gitcode-cli 兼容，client_secret 由 broker 持有） | ❌ |
 
 ## 三、命令覆盖面
 
@@ -33,7 +35,7 @@
 | PR 生命周期（create/edit/merge/close/reopen/ready/diff/files/commits） | ✅ | ✅ |
 | PR cherry-pick / revert | ✅ 网页端接口 | ❌ |
 | PR 审批 approve / reset | ✅ 网页端接口 | ⚠️ v5 review --approve |
-| PR 行级审查评论 | ❌（等抓包补齐） | ✅ `pr comment --path --line` |
+| PR 行级审查评论 | ✅ `pr comment add --path <文件> --position <行号>`（v5 diff 评论通道） | ✅ `pr comment --path --line` |
 | PR checkout / checks | ✅ | ✅ |
 | Release / Tag | ✅ | ❌ |
 | 讨论 Discussions（v1 网页接口） | ✅ | ❌ |
@@ -54,7 +56,8 @@
 | PR 列表排序与统计 | ✅ `--web --order-by updated_at/merged_at/created_at`、`--count` 一次返回全状态 | ⚠️ state 过滤 |
 | 仓库参数形式 | ✅ 位置参数 / `--repo` / `-R` / 完整 URL / git@ 形式 / remote 自动推断 | ⚠️ `-R owner/repo` + remote 推断 |
 | 从文件读正文 | ✅ `--file`（issue create / pr create / pr comment add） | ❌ |
-| 行级评论 | ❌ | ✅ |
+| 行级评论 | ✅ `--path` + `--position`（行级走 v5 diff 评论，`--web` 普通评论不支持行级会明确报错） | ✅ `--path` + `--line` |
+| 扫码登录二维码 | ✅ 终端 Unicode 半块渲染，URL 超长自动降级为纯链接 | ❌ |
 
 ## 五、可靠性与性能
 
@@ -67,8 +70,13 @@
 
 ## 六、结论
 
-- **gc 已在绝大多数维度领先或持平**：认证双体系、git 凭据免密、Release/讨论/组织、cherry-pick/revert/审批、裸 API 透传、`--json`/`--jq`、termimad、稀疏缓存 grep、请求重试、MCP——gcl 的既有优势（结构化输出、Markdown 渲染、PR 工作流）已全部追平或反超。
-- **gcl 仅剩两张牌**：
-  1. **PR 行级审查评论**（gc 的网页端 notes 通道已就绪，待补接口抓包）；
-  2. **代码组织**（commands/ 分域拆分 vs gc 偏大的 api.rs/cli.rs——gc 后续重构方向）。
-- 值得吸收的小点：`gcl skill add`（把 CLI 用法装成 AI 工具技能文件），与 gc 的 MCP 定位互补，成本低。
+- **gc 已全面领先**：认证四通道（浏览器抓取 / PAT / git 凭据助手 / broker 扫码）、git 凭据免密、Release/讨论/组织、cherry-pick/revert/审批、PR 行级评论、裸 API 透传、`--json`/`--jq`、termimad、稀疏缓存 grep、请求重试、MCP + skill 双 AI 集成、crates.io 一键安装——gcl 此前的差异化优势（结构化输出、Markdown 渲染、PR 工作流细节、行级评论）已全部追平或反超。
+- **gcl 剩余差异仅在工程风格**：async tokio 运行时 vs gc 的 blocking reqwest；单 crate commands/ 拆分 vs gc 的 workspace 多 crate——两者都已按域拆分，属路线差异而非能力差距。
+- 仍值得吸收的小点：`gcl skill add` 的静态技能文件思路与 gc 的 MCP 定位互补（gc 的 `skill install` 已覆盖同类场景）。
+
+## 附：本次更新（2026-10-25）
+
+- gc 补齐 **PR 行级审查评论**（`pr comment add --path/--position`），gcl 最后两张功能性牌清零；
+- gc 重构为 **Cargo workspace 10 crate**，“代码组织”从劣势转为对等；
+- 新增 **OAuth broker 扫码登录**（`gc auth login --qr`）；
+- gc 主包以 **gitcode-gc** 上架 crates.io（`gc` 包名已被占用），支持 `cargo install gitcode-gc`。
