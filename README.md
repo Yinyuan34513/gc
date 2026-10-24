@@ -26,7 +26,30 @@ gc token set
 
 # 检查当前 token 是否有效
 gc auth
+
+# 直接输出 PAT（明文，可管道使用）
+export GIT_TOKEN=$(gc auth pal)
+
+# 把 gc 注册为 git 凭据助手（全局，gitcode.com / atomgit.com）
+gc auth git
 ```
+
+### git 凭据自动配置
+
+执行一次 `gc auth git` 之后，gc 会把自己注册为 git 的 credential helper
+（写入全局配置 `credential.https://gitcode.com.helper` 和
+`credential.https://atomgit.com.helper`）。之后所有针对这两个站点的
+HTTPS `git push` / `git pull` / `git clone` 都会自动带上 gc 里保存的
+PAT，**不需要再手动设置账号密码**，也不用把 token 明文写进
+`~/.git-credentials`。
+
+```bash
+gc auth git            # 全局注册（默认）
+gc auth git --local    # 只对当前仓库生效
+```
+
+只想装某一个仓库的话用 `--local`。换 token 后无需重新注册——
+helper 每次实时读取 gc 的配置。
 
 部分接口（讨论 Discussions）走的是网页端 v1 接口，需要浏览器的 JWT，而不是 PAT：
 

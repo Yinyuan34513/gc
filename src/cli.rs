@@ -961,6 +961,16 @@ enum AuthAction {
         #[arg(long)]
         web: bool,
     },
+    /// 把 gc 注册为 git 凭据助手（gitcode.com / atomgit.com）：
+    /// 之后 git push/pull 走 HTTPS 时自动带上 PAT，不再需要配置账号密码
+    Git {
+        /// 只配置当前仓库（默认写入全局配置）
+        #[arg(long)]
+        local: bool,
+    },
+    /// 供 git credential helper 调用（勿手动使用）
+    #[command(hide = true)]
+    Credential,
 }
 
 #[derive(Parser)]
@@ -1759,6 +1769,48 @@ pub fn run() -> Result<()> {
             }
             Some(AuthAction::Login { web, with_token }) => {
                 crate::auth::login(web, with_token)?;
+            }
+            Some(AuthAction::Git { local }) => {
+                // 把 gc 注册为对应主机的 git credential helper：
+                // git 在需要凭据时会调用 `gc auth credential`，由它输出 PAT，
+                // 之后 HTTPS push/pull 不再要求输入账号密码。
+                for host in ["gitcode.com", "atomgit.com"] {
+                    let key = format!("credential.https://{}.helper", host);
+                    // 注意：Command::args 是追加语义，必须每轮新建，否则参数会累积
+                    let status = std::process::Command::new("git")
+                        .arg("config")
+                        .arg(if local { "--local" } else { "--global" })
+                        .args(["--replace-all", &key, "!gc auth credential"])
+                        .status()
+                        .context("执行 git config 失败（未安装 git？）")?;
+                    if !status.success() {
+                        anyhow::bail!("git config {} 失败", key);
+                    }
+                    println!("已注册凭据助手：{}（{}）", key, if local { "本仓库" } else { "全局" });
+                }
+                println!("之后 git push/pull gitcode.com / atomgit.com 将自动使用 gc 的 PAT，无需再配置凭据。");
+            }
+            Some(AuthAction::Credential) => {
+                // git credential helper 协议：stdin 收到请求（含 host=...），stdout 输出键值对
+                use std::io::Read;
+                let mut input = String::new();
+                let _ = std::io::stdin().read_to_string(&mut input);
+                let host = input
+                    .lines()
+                    .find_map(|l| l.strip_prefix("host="))
+                    .unwrap_or("")
+                    .to_lowercase();
+                // 只服务于 GitCode / AtomGit，其他主机不输出（git 会继续找下一个 helper）
+                if !(host.contains("gitcode.com") || host.contains("atomgit.com")) {
+                    std::process::exit(1);
+                }
+                let token = config::load_token()?.unwrap_or_default();
+                if token.trim().is_empty() {
+                    eprintln!("gc：未配置 PAT，请先执行 gc token set");
+                    std::process::exit(1);
+                }
+                println!("username=gc");
+                println!("password={}", token);
             }
             Some(AuthAction::Pal { web }) => {
                 let token = if web {
