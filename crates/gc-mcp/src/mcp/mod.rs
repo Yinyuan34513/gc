@@ -199,7 +199,8 @@ impl Server {
             Err(e) => {
                 // 解析失败时拿不到 id，按规范用 null。
                 return Action::Reply(
-                    Response::err(Value::Null, PARSE_ERROR, format!("JSON 解析失败: {e}")).to_line(),
+                    Response::err(Value::Null, PARSE_ERROR, format!("JSON 解析失败: {e}"))
+                        .to_line(),
                 );
             }
         };
@@ -337,36 +338,39 @@ fn tools_call_impl(
     allow_destructive: bool,
     params: &Value,
 ) -> std::result::Result<Value, RpcError> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RpcError {
-                code: INVALID_PARAMS,
-                message: "tools/call 缺少 name 参数".into(),
-                data: None,
-            })?;
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError {
+            code: INVALID_PARAMS,
+            message: "tools/call 缺少 name 参数".into(),
+            data: None,
+        })?;
 
-        let Some(tool) = tools::find(name, allow_destructive) else {
-            // 工具不存在属于协议层错误。
-            let hint = if tools::find(name, true).is_some() {
-                format!("工具 `{name}` 是破坏性操作，需要以 --allow-destructive 启动服务器才能使用")
-            } else {
-                format!("未知工具: {name}")
-            };
-            return Err(RpcError {
-                code: INVALID_PARAMS,
-                message: hint,
-                data: None,
-            });
+    let Some(tool) = tools::find(name, allow_destructive) else {
+        // 工具不存在属于协议层错误。
+        let hint = if tools::find(name, true).is_some() {
+            format!("工具 `{name}` 是破坏性操作，需要以 --allow-destructive 启动服务器才能使用")
+        } else {
+            format!("未知工具: {name}")
         };
+        return Err(RpcError {
+            code: INVALID_PARAMS,
+            message: hint,
+            data: None,
+        });
+    };
 
-        let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
-        // 工具**执行**失败不是 JSON-RPC 错误：要作为结果回给模型，让它能看到并自愈。
-        Ok(match (tool.handler)(&args) {
-            Ok(v) => tool_result(&v, false),
-            Err(e) => tool_result(&json!({ "error": format!("{e:#}") }), true),
-        })
+    // 工具**执行**失败不是 JSON-RPC 错误：要作为结果回给模型，让它能看到并自愈。
+    Ok(match (tool.handler)(&args) {
+        Ok(v) => tool_result(&v, false),
+        Err(e) => tool_result(&json!({ "error": format!("{e:#}") }), true),
+    })
 }
 
 /// 执行一次 `tools/call` 并序列化成一行 JSON-RPC 响应（含 `\n`），供串行/并发两条路径共用。
@@ -458,7 +462,8 @@ fn response_err(id: Value, e: &RpcError) -> String {
 }
 
 /// 组装 `tools/call` 的返回体。
-fn tool_result(v: &Value, is_error: bool) -> Value {    let text = serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string());
+fn tool_result(v: &Value, is_error: bool) -> Value {
+    let text = serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string());
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": is_error,
@@ -571,7 +576,10 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(versions.contains(&"2026-07-28"), "应声明现代版本: {versions:?}");
+        assert!(
+            versions.contains(&"2026-07-28"),
+            "应声明现代版本: {versions:?}"
+        );
         assert!(versions.contains(&LEGACY_VERSIONS[0]), "应同时声明遗留版本");
         assert_eq!(
             r["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
@@ -585,7 +593,10 @@ mod tests {
     fn server_discover_works_even_without_meta() {
         // 现代客户端可能只发 `server/discover` 不带 _meta，也要能正常返回。
         let mut s = srv();
-        let r = call(&mut s, r#"{"jsonrpc":"2.0","id":1,"method":"server/discover"}"#);
+        let r = call(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"server/discover"}"#,
+        );
         assert!(r["result"]["supportedVersions"].as_array().unwrap().len() >= 1);
     }
 
@@ -757,10 +768,7 @@ mod tests {
             let v: Value = serde_json::from_str(l).expect("每行都必须是合法 JSON");
             assert_eq!(v["jsonrpc"], "2.0");
         }
-        assert_eq!(
-            serde_json::from_str::<Value>(lines[1]).unwrap()["id"],
-            2
-        );
+        assert_eq!(serde_json::from_str::<Value>(lines[1]).unwrap()["id"], 2);
     }
 
     #[test]

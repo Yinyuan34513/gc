@@ -16,8 +16,13 @@ base64.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
 rayon.workspace = true
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
+termimad = "0.35.5"
 toml = "0.8"
 rpassword = "1.0"
 indicatif = "0.17"
 tungstenite = "0.23"
 rusqlite = { version = "0.32", features = ["bundled"] }
+qrcode = "0.14"

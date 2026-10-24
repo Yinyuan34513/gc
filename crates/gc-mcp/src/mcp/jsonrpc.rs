@@ -107,7 +107,8 @@ mod tests {
 
     #[test]
     fn parses_request_and_notification() {
-        let r: Request = serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).unwrap();
+        let r: Request =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).unwrap();
         assert!(!r.is_notification());
         assert_eq!(r.method, "ping");
 

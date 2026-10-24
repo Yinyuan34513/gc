@@ -6,9 +6,8 @@
 use anyhow::Context as _;
 use rmcp::{
     model::{
-        CallToolRequestParam, CallToolResult, Content, ErrorCode, Implementation,
-        ListToolsResult, PaginatedRequestParam, ProtocolVersion, ServerCapabilities, ServerInfo,
-        ToolsCapability,
+        CallToolRequestParam, CallToolResult, Content, ErrorCode, Implementation, ListToolsResult,
+        PaginatedRequestParam, ProtocolVersion, ServerCapabilities, ServerInfo, ToolsCapability,
     },
     service::{RequestContext, RoleServer},
     ServerHandler, ServiceExt,
@@ -45,8 +44,7 @@ impl ServerHandler for GcMcpServer {
                 ..Default::default()
             },
             instructions: Some(
-                "GitCode/AtomGit 命令行 gc 的 MCP 服务端：仓库 / Issue / PR / 搜索等工具。"
-                    .into(),
+                "GitCode/AtomGit 命令行 gc 的 MCP 服务端：仓库 / Issue / PR / 搜索等工具。".into(),
             ),
         }
     }

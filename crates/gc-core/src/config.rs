@@ -46,13 +46,17 @@ pub fn api_base() -> String {
 
 /// Git 克隆基址，可用环境变量 GITCODE_GIT_BASE 覆盖（默认 https://gitcode.com）
 pub fn git_base() -> String {
-    std::env::var("GITCODE_GIT_BASE")
-        .unwrap_or_else(|_| "https://gitcode.com".to_string())
+    std::env::var("GITCODE_GIT_BASE").unwrap_or_else(|_| "https://gitcode.com".to_string())
 }
 
 /// 拼出仓库的 Git HTTPS 地址
 pub fn clone_url(owner: &str, name: &str) -> String {
-    format!("{}/{}/{}.git", git_base().trim_end_matches('/'), owner, name)
+    format!(
+        "{}/{}/{}.git",
+        git_base().trim_end_matches('/'),
+        owner,
+        name
+    )
 }
 
 /// ~/.config/gitcode.toml 的完整路径
@@ -103,8 +107,7 @@ pub fn save_token(token: &str) -> Result<String> {
             .map_err(|e| anyhow!("创建目录 {} 失败: {}", parent.display(), e))?;
     }
     let body = toml::to_string(&cfg).map_err(|e| anyhow!("序列化配置失败: {}", e))?;
-    std::fs::write(&path, body)
-        .map_err(|e| anyhow!("写入 {} 失败: {}", path.display(), e))?;
+    std::fs::write(&path, body).map_err(|e| anyhow!("写入 {} 失败: {}", path.display(), e))?;
 
     Ok(token.trim().to_string())
 }
@@ -149,12 +152,11 @@ pub fn load_web_tokens() -> Result<(String, String)> {
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| anyhow!("读取 {} 失败: {}", path.display(), e))?;
-            let cfg: TomlConfig =
-                toml::from_str(&text).unwrap_or(TomlConfig {
-                    token: None,
-                    web_token: None,
-                    web_refresh: None,
-                });
+            let cfg: TomlConfig = toml::from_str(&text).unwrap_or(TomlConfig {
+                token: None,
+                web_token: None,
+                web_refresh: None,
+            });
             if let (Some(a), Some(r)) = (cfg.web_token, cfg.web_refresh) {
                 if !a.trim().is_empty() && !r.trim().is_empty() {
                     return Ok((a.trim().to_string(), r.trim().to_string()));
@@ -209,4 +211,3 @@ pub fn prompt_and_save_web_tokens() -> Result<(String, String)> {
     save_web_tokens(&access, &refresh)?;
     Ok((access, refresh))
 }
-

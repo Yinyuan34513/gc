@@ -10,3 +10,7 @@ repository.workspace = true
 gc-core.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+gc-grep.workspace = true
+base64.workspace = true
+rpassword = "1.0"

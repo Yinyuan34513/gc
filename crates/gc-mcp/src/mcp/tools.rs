@@ -55,7 +55,9 @@ pub fn registry(allow_destructive: bool) -> Vec<&'static Tool> {
 }
 
 pub fn find(name: &str, allow_destructive: bool) -> Option<&'static Tool> {
-    registry(allow_destructive).into_iter().find(|t| t.name == name)
+    registry(allow_destructive)
+        .into_iter()
+        .find(|t| t.name == name)
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +182,9 @@ fn u64_list(a: &Value, k: &str) -> Result<Vec<u64>> {
     }
     arr.iter()
         .map(|v| match v {
-            Value::Number(n) => n.as_u64().ok_or_else(|| anyhow!("`{k}` 的元素必须是非负整数")),
+            Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(|| anyhow!("`{k}` 的元素必须是非负整数")),
             Value::String(s) => s
                 .trim()
                 .parse::<u64>()
@@ -2996,7 +3000,10 @@ fn batch(ids: &[u64], mut f: impl FnMut(u64) -> Result<Value>) -> Result<Value> 
         }
     }
     if ok.is_empty() && !failed.is_empty() {
-        bail!("全部失败: {}", serde_json::to_string(&failed).unwrap_or_default());
+        bail!(
+            "全部失败: {}",
+            serde_json::to_string(&failed).unwrap_or_default()
+        );
     }
     Ok(json!({ "succeeded": ok, "failed": failed }))
 }
@@ -3039,7 +3046,11 @@ mod tests {
     fn every_tool_has_a_valid_object_schema() {
         for t in ALL {
             let s = (t.schema)();
-            assert_eq!(s["type"], "object", "{} 的 schema 顶层必须是 object", t.name);
+            assert_eq!(
+                s["type"], "object",
+                "{} 的 schema 顶层必须是 object",
+                t.name
+            );
             assert!(s["properties"].is_object(), "{} 缺少 properties", t.name);
             assert!(s["required"].is_array(), "{} 缺少 required", t.name);
             assert!(!t.description.is_empty(), "{} 缺少描述", t.name);

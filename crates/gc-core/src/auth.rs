@@ -92,13 +92,48 @@ fn in_path(bin: &str) -> bool {
 fn detect_browsers() -> Vec<Browser> {
     let Ok(h) = home() else { return Vec::new() };
     let candidates: [(&str, &str, Family, Option<&str>); 9] = [
-        ("Chrome", "google-chrome", Family::Chromium, Some(".config/google-chrome")),
-        ("Chrome", "google-chrome-stable", Family::Chromium, Some(".config/google-chrome")),
-        ("Chromium", "chromium", Family::Chromium, Some(".config/chromium")),
-        ("Chromium", "chromium-browser", Family::Chromium, Some(".config/chromium")),
-        ("Microsoft Edge", "microsoft-edge", Family::Chromium, Some(".config/microsoft-edge")),
-        ("Brave", "brave-browser", Family::Chromium, Some(".config/brave-browser")),
-        ("Vivaldi", "vivaldi", Family::Chromium, Some(".config/vivaldi")),
+        (
+            "Chrome",
+            "google-chrome",
+            Family::Chromium,
+            Some(".config/google-chrome"),
+        ),
+        (
+            "Chrome",
+            "google-chrome-stable",
+            Family::Chromium,
+            Some(".config/google-chrome"),
+        ),
+        (
+            "Chromium",
+            "chromium",
+            Family::Chromium,
+            Some(".config/chromium"),
+        ),
+        (
+            "Chromium",
+            "chromium-browser",
+            Family::Chromium,
+            Some(".config/chromium"),
+        ),
+        (
+            "Microsoft Edge",
+            "microsoft-edge",
+            Family::Chromium,
+            Some(".config/microsoft-edge"),
+        ),
+        (
+            "Brave",
+            "brave-browser",
+            Family::Chromium,
+            Some(".config/brave-browser"),
+        ),
+        (
+            "Vivaldi",
+            "vivaldi",
+            Family::Chromium,
+            Some(".config/vivaldi"),
+        ),
         ("Opera", "opera", Family::Chromium, Some(".config/opera")),
         ("Firefox", "firefox", Family::Firefox, None),
     ];
@@ -110,7 +145,9 @@ fn detect_browsers() -> Vec<Browser> {
         }
         // Chromium 系按 profile 目录去重（同一浏览器可能有多个软链名）
         let key = match family {
-            Family::Chromium => rel.map(|r| h.join(r).to_string_lossy().to_string()).unwrap_or_else(|| bin.to_string()),
+            Family::Chromium => rel
+                .map(|r| h.join(r).to_string_lossy().to_string())
+                .unwrap_or_else(|| bin.to_string()),
             Family::Firefox => format!("firefox:{bin}"),
         };
         if seen.contains(&key) {
@@ -133,7 +170,12 @@ fn install_browser() -> Result<()> {
         .arg("-u")
         .output()
         .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
         .map(|uid| uid == 0)
         .unwrap_or(false);
     let plans: [(&str, &[&str]); 4] = [
@@ -166,9 +208,11 @@ fn install_browser() -> Result<()> {
 
 /// 取一个空闲的本地端口
 fn free_port() -> Result<u16> {
-    let l = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| anyhow!("获取空闲端口失败: {e}"))?;
-    Ok(l.local_addr().map_err(|e| anyhow!("读取端口失败: {e}"))?.port())
+    let l =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| anyhow!("获取空闲端口失败: {e}"))?;
+    Ok(l.local_addr()
+        .map_err(|e| anyhow!("读取端口失败: {e}"))?
+        .port())
 }
 
 /// 以用户默认 profile + 调试端口启动 Chromium 系浏览器，打开登录页，
@@ -207,10 +251,7 @@ fn chromium_cookies(browser: &Browser, port: u16) -> Result<Vec<(String, String)
         }
         match client.get(format!("{base}/json/version")).send() {
             Ok(resp) if resp.status().is_success() => {
-                version = Some(
-                    resp.json::<Value>()
-                        .context("解析 CDP 版本响应失败")?,
-                );
+                version = Some(resp.json::<Value>().context("解析 CDP 版本响应失败")?);
                 break;
             }
             _ => {}
@@ -230,11 +271,10 @@ fn chromium_cookies(browser: &Browser, port: u16) -> Result<Vec<(String, String)
         .as_str()
         .ok_or_else(|| anyhow!("CDP 响应缺少 webSocketDebuggerUrl"))?;
 
-    let (mut sock, _) = tungstenite::connect(ws_url)
-        .map_err(|e| {
-            let _ = child.kill();
-            anyhow!("连接 CDP WebSocket 失败: {e}")
-        })?;
+    let (mut sock, _) = tungstenite::connect(ws_url).map_err(|e| {
+        let _ = child.kill();
+        anyhow!("连接 CDP WebSocket 失败: {e}")
+    })?;
     sock.send(tungstenite::Message::Text(
         json!({"id": 1, "method": "Network.getAllCookies"}).to_string(),
     ))
@@ -244,12 +284,10 @@ fn chromium_cookies(browser: &Browser, port: u16) -> Result<Vec<(String, String)
     })?;
     let mut found: Vec<(String, String)> = Vec::new();
     for _ in 0..100 {
-        let m = sock
-            .read()
-            .map_err(|e| {
-                let _ = child.kill();
-                anyhow!("读取 CDP 响应失败: {e}")
-            })?;
+        let m = sock.read().map_err(|e| {
+            let _ = child.kill();
+            anyhow!("读取 CDP 响应失败: {e}")
+        })?;
         let Ok(text) = m.to_text() else {
             continue;
         };
@@ -355,10 +393,7 @@ fn firefox_cookies() -> Result<Vec<(String, String)>> {
     })?;
     let db = profile_dir.join("cookies.sqlite");
     if !db.exists() {
-        return Err(anyhow!(
-            "{} 不存在——请确认已使用过 Firefox",
-            db.display()
-        ));
+        return Err(anyhow!("{} 不存在——请确认已使用过 Firefox", db.display()));
     }
     let tmp = std::env::temp_dir().join(format!("gc-cookies-{}.sqlite", std::process::id()));
     std::fs::copy(&db, &tmp)
@@ -373,7 +408,10 @@ fn firefox_cookies() -> Result<Vec<(String, String)>> {
             let v: String = r.get(1)?;
             Ok((n, v))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).filter(|(_, v)| !v.is_empty()).collect())
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .filter(|(_, v)| !v.is_empty())
+            .collect())
     })();
     let _ = std::fs::remove_file(&tmp);
     result
@@ -408,10 +446,7 @@ pub fn show_account(api: &crate::api::ApiClient, jwt: Option<&str>) {
             if !login.is_empty() {
                 println!("  主页:    https://gitcode.com/{login}");
             }
-            if let Ok(p) = crate::api::user_profile(
-                jwt.unwrap_or(""),
-                &login,
-            ) {
+            if let Ok(p) = crate::api::user_profile(jwt.unwrap_or(""), &login) {
                 if !p.nickname.is_empty() {
                     println!("  昵称:    {}", p.nickname);
                 }
@@ -465,11 +500,49 @@ pub fn show_account(api: &crate::api::ApiClient, jwt: Option<&str>) {
 
 // ---------- 登录入口 ----------
 
+/// `gc auth login --qr`：OAuth broker 扫码登录。
+/// broker 返回的 access token 直接存为 PAT，随后走与手动登录一致的验证/展示。
+pub fn qr_login(broker: Option<&str>) -> Result<()> {
+    let base = crate::qr_login::broker_base_url(broker)?;
+    let session = crate::qr_login::start_login(&base)?;
+    println!("请用已登录 GitCode 的手机 / 浏览器扫描下方二维码：");
+    if let Some(rendered) = crate::qr_login::render_qr(session.url()) {
+        println!("{rendered}");
+    } else {
+        println!("（链接过长，无法渲染二维码，请直接打开下方链接）");
+    }
+    println!("如无法扫码，请打开: {}", session.url());
+
+    let token = crate::qr_login::wait_for_authorization(&session)?;
+    if token.access_token.trim().is_empty() {
+        anyhow::bail!("broker 返回的 access token 为空");
+    }
+    let name = token
+        .user
+        .clone()
+        .unwrap_or_else(|| "GitCode 用户".to_string());
+    crate::config::save_token(&token.access_token)?;
+    println!("已扫码登录: {name}");
+    if token.refresh_token.is_some() {
+        println!("提示: broker 提供了 refresh token，但 gc 目前不自动刷新 PAT，过期后请重新扫码");
+    }
+    let api = crate::api::ApiClient::new(crate::config::api_base(), Some(token.access_token))?;
+    show_account(&api, None);
+    Ok(())
+}
+
 /// `gc auth login`：
+/// - `--qr`：OAuth broker 扫码登录；
 /// - `--with-token`：从 stdin 读 token（脚本场景，与 gh 一致）；
 /// - TTY：交互式选择「浏览器登录」或「粘贴 token」；
 /// - 非 TTY 且无参数：报错，要求显式传参。
-pub fn login(web: bool, with_token: bool) -> Result<()> {
+pub fn login(web: bool, with_token: bool, qr: bool, broker: Option<&str>) -> Result<()> {
+    if qr && (web || with_token) {
+        anyhow::bail!("--qr 与 --web / --with-token 只能使用其一");
+    }
+    if qr {
+        return qr_login(broker);
+    }
     if with_token && web {
         anyhow::bail!("--web 与 --with-token 只能使用其一");
     }
@@ -490,9 +563,7 @@ pub fn login(web: bool, with_token: bool) -> Result<()> {
         if web {
             0
         } else {
-            anyhow::bail!(
-                "非交互环境：请使用 --web 走浏览器登录，或用 --with-token 传入 token"
-            );
+            anyhow::bail!("非交互环境：请使用 --web 走浏览器登录，或用 --with-token 传入 token");
         }
     } else {
         let options = ["使用浏览器登录（推荐）", "粘贴访问令牌 (Token)"];
@@ -589,6 +660,3 @@ fn browser_login() -> Result<()> {
     show_account(&api, Some(&access));
     Ok(())
 }
-
-
-

@@ -11,3 +11,5 @@ gc-core.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 rayon.workspace = true
+grep = "0.4.1"
+dirs.workspace = true

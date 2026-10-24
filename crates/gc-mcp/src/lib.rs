@@ -10,8 +10,8 @@
 // mcp 模块内的 handler 直接调用 api / config 层，挂到 crate 根保持
 // `crate::api` 等路径不变；ctx 助手以 `crate::cli` 别名暴露，
 // 保持 tools.rs 原有 `crate::cli::resolve_repo` 等调用点不动。
-pub use gc_core::{api, auth, config};
 pub use gc_core::ctx as cli;
+pub use gc_core::{api, auth, config};
 
 pub mod mcp;
 pub mod rmcp_server;

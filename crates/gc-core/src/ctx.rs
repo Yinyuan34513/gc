@@ -11,8 +11,12 @@ use anyhow::Result;
 pub fn split_repo(s: &str) -> Result<(String, String)> {
     let s = parse_gitcode_repo(s).unwrap_or_else(|| s.to_string());
     let mut it = s.splitn(2, '/');
-    let o = it.next().ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
-    let n = it.next().ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
+    let o = it
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
+    let n = it
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("仓库格式应为 owner/name"))?;
     if o.is_empty() || n.is_empty() {
         anyhow::bail!("仓库格式应为 owner/name");
     }
@@ -23,7 +27,7 @@ pub fn split_repo(s: &str) -> Result<(String, String)> {
 /// 则用它，否则 origin。上游 @oh-gc/cli 是往仓库里写 `.gitcode` 文件记这个值；
 /// 这里改用 git 自己的 local config，省掉一个需要进 .gitignore 的文件，
 /// 也能直接 `git config gc.remote` 查改。
-fn configured_remote() -> String {
+pub fn configured_remote() -> String {
     std::process::Command::new("git")
         .args(["config", "--get", "gc.remote"])
         .output()
@@ -36,7 +40,7 @@ fn configured_remote() -> String {
 
 /// 从当前目录的 git remote 推断 owner/name。
 /// 在克隆仓库目录下直接 `gc repo sync` 不指定 <REPO> 时使用，与 gh 行为一致。
-fn detect_repo_from_cwd() -> Option<String> {
+pub fn detect_repo_from_cwd() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["remote", "get-url", &configured_remote()])
         .output()
@@ -85,14 +89,20 @@ pub fn parse_gitcode_repo(url: &str) -> Option<String> {
         let rest = &u[p + 3..];
         let i = rest.find('/')?;
         let host = &rest[..i];
-        if !HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}"))) {
+        if !HOSTS
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        {
             return None;
         }
         &rest[i + 1..]
     } else if let Some(r) = u.strip_prefix("git@") {
         let i = r.find(':')?;
         let host = &r[..i];
-        if !HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}"))) {
+        if !HOSTS
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        {
             return None;
         }
         &r[i + 1..]
@@ -126,4 +136,17 @@ pub fn web_access_token() -> Result<String> {
             Ok(access)
         }
     }
+}
+
+/// 运行 git 命令，失败时返回带 stderr 的错误。
+pub fn git_run(args: &[&str]) -> Result<()> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| anyhow::anyhow!("运行 git 失败: {}", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(anyhow::anyhow!("git {} 失败: {}", args.join(" "), err));
+    }
+    Ok(())
 }

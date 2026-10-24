@@ -8,7 +8,7 @@
 
 // 把 gc-core 的模块原样挂到本 crate 根下，cli.rs 里的 `crate::api` /
 // `crate::config` 等路径无需改动。
-pub use gc_core::{api, auth, config};
+pub use gc_core::{api, auth, config, ctx, output};
 
 // MCP 服务端由独立 crate 提供，cli.rs 以 `crate::mcp` 引用。
 pub use gc_mcp::mcp;

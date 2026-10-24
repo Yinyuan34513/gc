@@ -7,3 +7,6 @@ pub use gc_core::api::{
     issue_attachment_upload, issue_close, issue_create, issue_edit, issue_list, issue_reopen,
     issue_reply, issue_view,
 };
+
+pub use gc_core::api;
+pub mod cli;

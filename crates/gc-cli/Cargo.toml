@@ -21,10 +21,5 @@ dirs.workspace = true
 base64.workspace = true
 reqwest.workspace = true
 clap = { version = "4.5", features = ["derive"] }
-jaq-core = "3"
-jaq-std = "3"
-jaq-json = "2"
-termimad = "0.35.5"
-grep = "0.4.1"
 regex.workspace = true
 rpassword = "1.0"

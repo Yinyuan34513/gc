@@ -1,2 +1,4 @@
 /target
 .competitors/
+# 会话日志（可能含抓包 token，禁止提交）
+atomcode-*.md

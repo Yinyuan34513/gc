@@ -100,7 +100,11 @@ fn handshake_succeeds_and_eof_exits_cleanly() {
 fn stdout_is_protocol_only_and_logs_go_to_stderr() {
     let r = mcp(
         &[],
-        &[INIT, INITED, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#],
+        &[
+            INIT,
+            INITED,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ],
     );
     // messages() 会逐行断言可解析；这里再确认没有多余的行。
     assert_eq!(r.messages().len(), 2, "stdout=\n{}", r.stdout);
@@ -157,7 +161,9 @@ fn server_discover_probe_with_unsupported_version_is_modern_error() {
     // 这样双 era 客户端能据此判定这是个现代服务端。
     let r = mcp(
         &[],
-        &[r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01"}}}"#],
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01"}}}"#,
+        ],
     );
     let disc = &r.messages()[0];
     assert_eq!(disc["error"]["code"], -32022);
@@ -258,7 +264,13 @@ fn protocol_errors_do_not_kill_the_session() {
 
 #[test]
 fn notifications_alone_produce_no_stdout() {
-    let r = mcp(&[], &[INITED, r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#]);
+    let r = mcp(
+        &[],
+        &[
+            INITED,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#,
+        ],
+    );
     assert_eq!(r.code, Some(0));
     assert!(r.stdout.is_empty(), "通知不该有任何输出: {:?}", r.stdout);
 }

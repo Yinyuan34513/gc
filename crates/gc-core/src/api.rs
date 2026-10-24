@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 网页端接口统一伪装成浏览器 —— 服务端会按 UA 拦请求。
@@ -72,7 +72,11 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(base: String, token: Option<String>) -> Result<Self> {
         let client = http_client("gc/0.1 (GitCode CLI)")?;
-        Ok(Self { base, token, client })
+        Ok(Self {
+            base,
+            token,
+            client,
+        })
     }
 
     /// 从错误文本里抹掉 access_token（reqwest 的 URL 错误会把带 token 的完整链接打出来）。
@@ -150,10 +154,10 @@ impl ApiClient {
         let m = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
             .map_err(|e| anyhow!("无效的 HTTP 方法 {}: {}", method, e))?;
         let parsed_body = match body {
-            Some(s) if !s.trim().is_empty() => {
-                Some(serde_json::from_str::<Value>(s)
-                    .map_err(|e| anyhow!("-b 的内容不是合法 JSON：{}", e))?)
-            }
+            Some(s) if !s.trim().is_empty() => Some(
+                serde_json::from_str::<Value>(s)
+                    .map_err(|e| anyhow!("-b 的内容不是合法 JSON：{}", e))?,
+            ),
             _ => None,
         };
         self.request(m, path, &[], parsed_body.as_ref())
@@ -181,7 +185,13 @@ impl ApiClient {
     }
 
     /// 分页 GET：`page` / `per_page` 传 0 表示不带该参数，用服务端默认值。
-    fn get_paged(&self, path: &str, page: u64, per_page: u64, extra: &[(&str, &str)]) -> Result<Value> {
+    fn get_paged(
+        &self,
+        path: &str,
+        page: u64,
+        per_page: u64,
+        extra: &[(&str, &str)],
+    ) -> Result<Value> {
         let p = page.to_string();
         let pp = per_page.to_string();
         let mut q: Vec<(&str, &str)> = extra.to_vec();
@@ -254,13 +264,21 @@ impl ApiClient {
         if let Some(p) = path {
             body.insert("path".into(), Value::String(p.to_string()));
         }
-        self.post(&format!("/repos/{}/{}/forks", owner, name), &Value::Object(body))
+        self.post(
+            &format!("/repos/{}/{}/forks", owner, name),
+            &Value::Object(body),
+        )
     }
 
     /// 删除仓库（v5 开放 API：DELETE /repos/{owner}/{name}）。危险操作，调用方需先确认。
     /// 成功时响应体为空（返回 Value::Null）。
     pub fn delete_repo(&self, owner: &str, name: &str) -> Result<Value> {
-        self.request(reqwest::Method::DELETE, &format!("/repos/{}/{}", owner, name), &[], None)
+        self.request(
+            reqwest::Method::DELETE,
+            &format!("/repos/{}/{}", owner, name),
+            &[],
+            None,
+        )
     }
 
     // ---- 仓库设置 / 统计 / 治理 ----
@@ -274,22 +292,43 @@ impl ApiClient {
     }
 
     /// 转移仓库归属（POST /repos/{owner}/{name}/transfer）。`team_ids` 为空则不带该字段。
-    pub fn transfer_repo(&self, owner: &str, name: &str, new_owner: &str, team_ids: &[u64]) -> Result<Value> {
+    pub fn transfer_repo(
+        &self,
+        owner: &str,
+        name: &str,
+        new_owner: &str,
+        team_ids: &[u64],
+    ) -> Result<Value> {
         let mut body = serde_json::Map::new();
         body.insert("new_owner".into(), Value::String(new_owner.to_string()));
         if !team_ids.is_empty() {
             body.insert("team_ids".into(), json!(team_ids));
         }
-        self.post(&format!("/repos/{}/{}/transfer", owner, name), &Value::Object(body))
+        self.post(
+            &format!("/repos/{}/{}/transfer", owner, name),
+            &Value::Object(body),
+        )
     }
 
     /// 列出仓库的 fork（GET /repos/{owner}/{name}/forks）。`sort`: newest / oldest / stargazers。
-    pub fn list_forks(&self, owner: &str, name: &str, sort: &str, page: u64, per_page: u64) -> Result<Value> {
+    pub fn list_forks(
+        &self,
+        owner: &str,
+        name: &str,
+        sort: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
         let mut q: Vec<(&str, &str)> = vec![];
         if !sort.is_empty() {
             q.push(("sort", sort));
         }
-        self.get_paged(&format!("/repos/{}/{}/forks", owner, name), page, per_page, &q)
+        self.get_paged(
+            &format!("/repos/{}/{}/forks", owner, name),
+            page,
+            per_page,
+            &q,
+        )
     }
 
     /// 读取仓库高级设置（GET /repos/{owner}/{name}/repo_settings）。
@@ -310,12 +349,24 @@ impl ApiClient {
     }
 
     /// 贡献者列表（GET /repos/{owner}/{name}/contributors）。`kind`: committers / authors。
-    pub fn repo_contributors(&self, owner: &str, name: &str, kind: &str, page: u64, per_page: u64) -> Result<Value> {
+    pub fn repo_contributors(
+        &self,
+        owner: &str,
+        name: &str,
+        kind: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
         let mut q: Vec<(&str, &str)> = vec![];
         if !kind.is_empty() {
             q.push(("type", kind));
         }
-        self.get_paged(&format!("/repos/{}/{}/contributors", owner, name), page, per_page, &q)
+        self.get_paged(
+            &format!("/repos/{}/{}/contributors", owner, name),
+            page,
+            per_page,
+            &q,
+        )
     }
 
     /// 贡献者统计（GET /repos/{owner}/{name}/contributors/statistic）：增删行数、提交数。
@@ -331,7 +382,12 @@ impl ApiClient {
         if !author.is_empty() {
             q.push(("author", author));
         }
-        self.get_paged(&format!("/repos/{}/{}/contributors/statistic", owner, name), page, per_page, &q)
+        self.get_paged(
+            &format!("/repos/{}/{}/contributors/statistic", owner, name),
+            page,
+            per_page,
+            &q,
+        )
     }
 
     /// 提交统计（GET /{owner}/{name}/repository/commit_statistics）。
@@ -360,7 +416,10 @@ impl ApiClient {
         if !until.is_empty() {
             q.push(("until", until));
         }
-        self.get(&format!("/{}/{}/repository/commit_statistics", owner, name), &q)
+        self.get(
+            &format!("/{}/{}/repository/commit_statistics", owner, name),
+            &q,
+        )
     }
 
     /// 下载量统计（GET /repos/{owner}/{name}/download_statistics）。`direction`: asc / desc。
@@ -382,7 +441,10 @@ impl ApiClient {
         if !direction.is_empty() {
             q.push(("direction", direction));
         }
-        self.get(&format!("/repos/{}/{}/download_statistics", owner, name), &q)
+        self.get(
+            &format!("/repos/{}/{}/download_statistics", owner, name),
+            &q,
+        )
     }
 
     /// 仓库动态（GET /repos/{owner}/{name}/events）。
@@ -412,12 +474,23 @@ impl ApiClient {
         if !after.is_empty() {
             q.push(("after", after));
         }
-        self.get_paged(&format!("/repos/{}/{}/events", owner, name), page, per_page, &q)
+        self.get_paged(
+            &format!("/repos/{}/{}/events", owner, name),
+            page,
+            per_page,
+            &q,
+        )
     }
 
     /// 归档 / 取消归档仓库（PUT /org/{org}/repo/{repo}/status）。
     /// status=2 归档、0 取消；服务端要求带账号密码二次确认。
-    pub fn archive_repo(&self, org: &str, repo: &str, archived: bool, password: &str) -> Result<Value> {
+    pub fn archive_repo(
+        &self,
+        org: &str,
+        repo: &str,
+        archived: bool,
+        password: &str,
+    ) -> Result<Value> {
         let body = json!({ "status": if archived { 2 } else { 0 }, "password": password });
         self.put(&format!("/org/{}/repo/{}/status", org, repo), &body)
     }
@@ -430,7 +503,10 @@ impl ApiClient {
 
     /// 设置仓库权限继承模式（PUT /repos/{owner}/{name}/transition）。
     pub fn update_repo_transition(&self, owner: &str, name: &str, mode: u8) -> Result<Value> {
-        self.put(&format!("/repos/{}/{}/transition", owner, name), &json!({ "mode": mode }))
+        self.put(
+            &format!("/repos/{}/{}/transition", owner, name),
+            &json!({ "mode": mode }),
+        )
     }
 
     /// 开关仓库功能模块（PUT /repos/{owner}/{name}/module/setting）。
@@ -472,7 +548,12 @@ impl ApiClient {
 
     /// 递归列出仓库文件树（v5 git trees）：返回 (path, sha)（仅 blob 文件，不含目录）。
     /// 用于 repo grep 的稀疏缓存：与本地缓存 SHA 对比后只下载有变化的文件。
-    pub fn repo_tree_entries(&self, owner: &str, name: &str, ref_name: &str) -> Result<Vec<(String, String)>> {
+    pub fn repo_tree_entries(
+        &self,
+        owner: &str,
+        name: &str,
+        ref_name: &str,
+    ) -> Result<Vec<(String, String)>> {
         let v = self.get(
             &format!("/repos/{}/{}/git/trees/{}", owner, name, ref_name),
             &[("recursive", "1")],
@@ -489,7 +570,6 @@ impl ApiClient {
         }
         Ok(out)
     }
-
 
     pub fn create_pull(
         &self,
@@ -568,12 +648,36 @@ impl ApiClient {
         self.get(&format!("{}/files", Self::pull_path(owner, name, num)), &[])
     }
 
-    pub fn pull_commits(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("{}/commits", Self::pull_path(owner, name, num)), page, per_page, &[])
+    pub fn pull_commits(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(
+            &format!("{}/commits", Self::pull_path(owner, name, num)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
-    pub fn pull_comments(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("{}/comments", Self::pull_path(owner, name, num)), page, per_page, &[])
+    pub fn pull_comments(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(
+            &format!("{}/comments", Self::pull_path(owner, name, num)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     /// 发表 PR 评论。给了 `path` + `position` 就是行级评论，否则是整体评论。
@@ -593,7 +697,10 @@ impl ApiClient {
         if let Some(p) = position {
             b["position"] = json!(p);
         }
-        self.post(&format!("{}/comments", Self::pull_path(owner, name, num)), &b)
+        self.post(
+            &format!("{}/comments", Self::pull_path(owner, name, num)),
+            &b,
+        )
     }
 
     /// 单条评论用的是不带 PR 编号的路径。
@@ -606,7 +713,10 @@ impl ApiClient {
     }
 
     pub fn edit_pull_comment(&self, owner: &str, name: &str, id: u64, body: &str) -> Result<Value> {
-        self.patch(&Self::comment_path(owner, name, id), &json!({ "body": body }))
+        self.patch(
+            &Self::comment_path(owner, name, id),
+            &json!({ "body": body }),
+        )
     }
 
     pub fn delete_pull_comment(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
@@ -615,11 +725,23 @@ impl ApiClient {
 
     /// 评论的编辑历史。注意路径是单数 `comment`，和上面的 `comments` 不是一回事。
     pub fn pull_comment_history(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/pulls/comment/{}/modify_history", owner, name, id), &[])
+        self.get(
+            &format!(
+                "/repos/{}/{}/pulls/comment/{}/modify_history",
+                owner, name, id
+            ),
+            &[],
+        )
     }
 
     pub fn pull_comment_reactions(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/pulls/comment/{}/user_reactions", owner, name, id), &[])
+        self.get(
+            &format!(
+                "/repos/{}/{}/pulls/comment/{}/user_reactions",
+                owner, name, id
+            ),
+            &[],
+        )
     }
 
     /// 在某条讨论线程下回复。
@@ -651,7 +773,11 @@ impl ApiClient {
         resolved: bool,
     ) -> Result<Value> {
         self.put(
-            &format!("{}/comments/{}", Self::pull_path(owner, name, num), enc(discussion_id)),
+            &format!(
+                "{}/comments/{}",
+                Self::pull_path(owner, name, num),
+                enc(discussion_id)
+            ),
             &json!({ "resolved": resolved }),
         )
     }
@@ -671,7 +797,13 @@ impl ApiClient {
         )
     }
 
-    pub fn remove_pull_reviewers(&self, owner: &str, name: &str, num: u64, reviewers: &str) -> Result<Value> {
+    pub fn remove_pull_reviewers(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        reviewers: &str,
+    ) -> Result<Value> {
         self.delete_body(
             &format!("{}/reviewers", Self::pull_path(owner, name, num)),
             &json!({ "reviewers": reviewers }),
@@ -692,7 +824,13 @@ impl ApiClient {
         )
     }
 
-    pub fn remove_pull_testers(&self, owner: &str, name: &str, num: u64, testers: &str) -> Result<Value> {
+    pub fn remove_pull_testers(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        testers: &str,
+    ) -> Result<Value> {
         self.delete_body(
             &format!("{}/testers", Self::pull_path(owner, name, num)),
             &json!({ "testers": testers }),
@@ -701,7 +839,10 @@ impl ApiClient {
 
     /// 可选评审人（候选列表）。
     pub fn pull_option_reviewers(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
-        self.get(&format!("{}/option_reviewers", Self::pull_path(owner, name, num)), &[])
+        self.get(
+            &format!("{}/option_reviewers", Self::pull_path(owner, name, num)),
+            &[],
+        )
     }
 
     /// 提交评审通过。`force` 用于绕过未满足的评审条件。
@@ -721,35 +862,99 @@ impl ApiClient {
     }
 
     /// 追加标签。请求体是裸数组。
-    pub fn add_pull_labels(&self, owner: &str, name: &str, num: u64, labels: &[String]) -> Result<Value> {
-        self.post(&format!("{}/labels", Self::pull_path(owner, name, num)), &json!(labels))
+    pub fn add_pull_labels(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        labels: &[String],
+    ) -> Result<Value> {
+        self.post(
+            &format!("{}/labels", Self::pull_path(owner, name, num)),
+            &json!(labels),
+        )
     }
 
     /// 覆盖标签（PUT 语义：传什么就只剩什么）。
-    pub fn replace_pull_labels(&self, owner: &str, name: &str, num: u64, labels: &[String]) -> Result<Value> {
-        self.put(&format!("{}/labels", Self::pull_path(owner, name, num)), &json!(labels))
+    pub fn replace_pull_labels(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        labels: &[String],
+    ) -> Result<Value> {
+        self.put(
+            &format!("{}/labels", Self::pull_path(owner, name, num)),
+            &json!(labels),
+        )
     }
 
     /// 移除标签。`names` 是逗号分隔的标签名，放在路径里。
-    pub fn remove_pull_labels(&self, owner: &str, name: &str, num: u64, names: &str) -> Result<Value> {
-        self.delete(&format!("{}/labels/{}", Self::pull_path(owner, name, num), enc(names)))
+    pub fn remove_pull_labels(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        names: &str,
+    ) -> Result<Value> {
+        self.delete(&format!(
+            "{}/labels/{}",
+            Self::pull_path(owner, name, num),
+            enc(names)
+        ))
     }
 
-    pub fn pull_linked_issues(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("{}/issues", Self::pull_path(owner, name, num)), page, per_page, &[])
+    pub fn pull_linked_issues(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(
+            &format!("{}/issues", Self::pull_path(owner, name, num)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     /// 关联 issue。请求体是裸数组。
-    pub fn link_pull_issues(&self, owner: &str, name: &str, num: u64, issues: &[u64]) -> Result<Value> {
-        self.post(&format!("{}/issues", Self::pull_path(owner, name, num)), &json!(issues))
+    pub fn link_pull_issues(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        issues: &[u64],
+    ) -> Result<Value> {
+        self.post(
+            &format!("{}/issues", Self::pull_path(owner, name, num)),
+            &json!(issues),
+        )
     }
 
-    pub fn unlink_pull_issues(&self, owner: &str, name: &str, num: u64, issues: &[u64]) -> Result<Value> {
-        self.delete_body(&format!("{}/issues", Self::pull_path(owner, name, num)), &json!(issues))
+    pub fn unlink_pull_issues(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        issues: &[u64],
+    ) -> Result<Value> {
+        self.delete_body(
+            &format!("{}/issues", Self::pull_path(owner, name, num)),
+            &json!(issues),
+        )
     }
 
     /// 指派负责人。`assignees` 是逗号分隔的用户名。
-    pub fn assign_pull_assignees(&self, owner: &str, name: &str, num: u64, assignees: &str) -> Result<Value> {
+    pub fn assign_pull_assignees(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        assignees: &str,
+    ) -> Result<Value> {
         self.post(
             &format!("{}/assignees", Self::pull_path(owner, name, num)),
             &json!({ "assignees": assignees }),
@@ -757,13 +962,32 @@ impl ApiClient {
     }
 
     /// 重置指派状态；`reset_all=true` 清空全部。
-    pub fn reset_pull_assignees(&self, owner: &str, name: &str, num: u64, reset_all: bool) -> Result<Value> {
-        let b = if reset_all { json!({ "reset_all": true }) } else { json!({}) };
-        self.patch(&format!("{}/assignees", Self::pull_path(owner, name, num)), &b)
+    pub fn reset_pull_assignees(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        reset_all: bool,
+    ) -> Result<Value> {
+        let b = if reset_all {
+            json!({ "reset_all": true })
+        } else {
+            json!({})
+        };
+        self.patch(
+            &format!("{}/assignees", Self::pull_path(owner, name, num)),
+            &b,
+        )
     }
 
     /// 移除指派人；`assignees` 为空表示移除全部。
-    pub fn remove_pull_assignees(&self, owner: &str, name: &str, num: u64, assignees: &str) -> Result<Value> {
+    pub fn remove_pull_assignees(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        assignees: &str,
+    ) -> Result<Value> {
         let path = format!("{}/assignees", Self::pull_path(owner, name, num));
         if assignees.is_empty() {
             self.delete(&path)
@@ -773,10 +997,19 @@ impl ApiClient {
     }
 
     pub fn pull_reactions(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
-        self.get(&format!("{}/user_reactions", Self::pull_path(owner, name, num)), &[])
+        self.get(
+            &format!("{}/user_reactions", Self::pull_path(owner, name, num)),
+            &[],
+        )
     }
 
-    pub fn create_pull_reaction(&self, owner: &str, name: &str, num: u64, content: &str) -> Result<Value> {
+    pub fn create_pull_reaction(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        content: &str,
+    ) -> Result<Value> {
         self.post(
             &format!("{}/user_reactions", Self::pull_path(owner, name, num)),
             &json!({ "content": content }),
@@ -784,19 +1017,40 @@ impl ApiClient {
     }
 
     pub fn pull_modify_history(&self, owner: &str, name: &str, num: u64) -> Result<Value> {
-        self.get(&format!("{}/modify_history", Self::pull_path(owner, name, num)), &[])
+        self.get(
+            &format!("{}/modify_history", Self::pull_path(owner, name, num)),
+            &[],
+        )
     }
 
-    pub fn pull_operate_logs(&self, owner: &str, name: &str, num: u64, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("{}/operate_logs", Self::pull_path(owner, name, num)), page, per_page, &[])
+    pub fn pull_operate_logs(
+        &self,
+        owner: &str,
+        name: &str,
+        num: u64,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(
+            &format!("{}/operate_logs", Self::pull_path(owner, name, num)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn pull_settings(&self, owner: &str, name: &str) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/pull_request_settings", owner, name), &[])
+        self.get(
+            &format!("/repos/{}/{}/pull_request_settings", owner, name),
+            &[],
+        )
     }
 
     pub fn update_pull_settings(&self, owner: &str, name: &str, body: &Value) -> Result<Value> {
-        self.put(&format!("/repos/{}/{}/pull_request_settings", owner, name), body)
+        self.put(
+            &format!("/repos/{}/{}/pull_request_settings", owner, name),
+            body,
+        )
     }
 
     // ---- 发行版 ----
@@ -844,9 +1098,7 @@ impl ApiClient {
             tag,
             self.token.as_deref().unwrap_or("")
         );
-        let total = std::fs::metadata(file)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let total = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
         let file_name = file
             .file_name()
             .and_then(|s| s.to_str())
@@ -863,8 +1115,7 @@ impl ApiClient {
         );
         bar.set_message("上传中");
         let reader = ProgressReader {
-            inner: std::fs::File::open(file)
-                .map_err(|e| anyhow!("打开文件失败: {}", e))?,
+            inner: std::fs::File::open(file).map_err(|e| anyhow!("打开文件失败: {}", e))?,
             bar: bar.clone(),
         };
         let part = reqwest::blocking::multipart::Part::reader_with_length(reader, total)
@@ -918,15 +1169,29 @@ impl ApiClient {
     // -- 分支 --
 
     pub fn branches(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/branches", owner, name), page, per_page, &[])
+        self.get_paged(
+            &format!("/repos/{}/{}/branches", owner, name),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn branch(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/branches/{}", owner, name, enc(branch)), &[])
+        self.get(
+            &format!("/repos/{}/{}/branches/{}", owner, name, enc(branch)),
+            &[],
+        )
     }
 
     /// 建分支。`refs` 是起点（分支名 / 标签 / commit SHA）。
-    pub fn create_branch(&self, owner: &str, name: &str, refs: &str, branch_name: &str) -> Result<Value> {
+    pub fn create_branch(
+        &self,
+        owner: &str,
+        name: &str,
+        refs: &str,
+        branch_name: &str,
+    ) -> Result<Value> {
         self.post(
             &format!("/repos/{}/{}/branches", owner, name),
             &json!({ "refs": refs, "branch_name": branch_name }),
@@ -934,24 +1199,53 @@ impl ApiClient {
     }
 
     pub fn delete_branch(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
-        self.delete(&format!("/repos/{}/{}/branches/{}", owner, name, enc(branch)))
+        self.delete(&format!(
+            "/repos/{}/{}/branches/{}",
+            owner,
+            name,
+            enc(branch)
+        ))
     }
 
     /// 开启分支保护。`body` 里放 pusher / merger 等策略字段。
-    pub fn protect_branch(&self, owner: &str, name: &str, branch: &str, body: &Value) -> Result<Value> {
+    pub fn protect_branch(
+        &self,
+        owner: &str,
+        name: &str,
+        branch: &str,
+        body: &Value,
+    ) -> Result<Value> {
         self.put(
-            &format!("/repos/{}/{}/branches/{}/protection", owner, name, enc(branch)),
+            &format!(
+                "/repos/{}/{}/branches/{}/protection",
+                owner,
+                name,
+                enc(branch)
+            ),
             body,
         )
     }
 
     pub fn unprotect_branch(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
-        self.delete(&format!("/repos/{}/{}/branches/{}/protection", owner, name, enc(branch)))
+        self.delete(&format!(
+            "/repos/{}/{}/branches/{}/protection",
+            owner,
+            name,
+            enc(branch)
+        ))
     }
 
     /// 读取单分支的保护配置（用于硬重置后尽量恢复原样）。分支未受保护时返回错误。
     pub fn branch_protection(&self, owner: &str, name: &str, branch: &str) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/branches/{}/protection", owner, name, enc(branch)), &[])
+        self.get(
+            &format!(
+                "/repos/{}/{}/branches/{}/protection",
+                owner,
+                name,
+                enc(branch)
+            ),
+            &[],
+        )
     }
 
     /// 硬重置分支到指定 SHA：删除后按 SHA 重建。
@@ -959,7 +1253,13 @@ impl ApiClient {
     /// 若分支受保护导致删除失败，自动解除保护再删、重建，并尽量恢复原有保护规则
     /// （恢复失败仅打印告警，不中断整体流程——避免把分支留在「未保护」状态却不提示）。
     /// 这把 `repo sync --force` 与 `repo fork --force` 的「删+建」逻辑统一收口到这里。
-    pub fn hard_reset_branch(&self, owner: &str, name: &str, branch: &str, sha: &str) -> Result<Value> {
+    pub fn hard_reset_branch(
+        &self,
+        owner: &str,
+        name: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<Value> {
         // 解保护后要还原的策略；None 表示原本就没保护（或没读到），重建后不用管
         let mut restore: Option<Value> = None;
 
@@ -968,11 +1268,21 @@ impl ApiClient {
             if let Err(e) = self.delete_branch(owner, name, branch) {
                 // 删除失败多半是分支受保护。先抓原策略，解保护后重试删除。
                 let saved = self.branch_protection(owner, name, branch).ok();
-                self.unprotect_branch(owner, name, branch)
-                    .map_err(|ue| anyhow!("删除分支 {} 失败（{}），自动解除保护也失败：{}", branch, e, ue))?;
+                self.unprotect_branch(owner, name, branch).map_err(|ue| {
+                    anyhow!(
+                        "删除分支 {} 失败（{}），自动解除保护也失败：{}",
+                        branch,
+                        e,
+                        ue
+                    )
+                })?;
                 restore = Some(saved.as_ref().map_or_else(|| json!({}), protect_body_from));
                 self.delete_branch(owner, name, branch).map_err(|de| {
-                    anyhow!("已解除分支 {} 的保护但删除仍失败：{}（原保护规则未恢复，请到网页端检查）", branch, de)
+                    anyhow!(
+                        "已解除分支 {} 的保护但删除仍失败：{}（原保护规则未恢复，请到网页端检查）",
+                        branch,
+                        de
+                    )
                 })?;
             }
         }
@@ -992,8 +1302,19 @@ impl ApiClient {
     }
 
     /// 列出通配符保护规则（和单分支保护是两套东西）。
-    pub fn branch_protect_rules(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/protect_branches", owner, name), page, per_page, &[])
+    pub fn branch_protect_rules(
+        &self,
+        owner: &str,
+        name: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(
+            &format!("/repos/{}/{}/protect_branches", owner, name),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     /// 新建通配符保护规则。注意是 PUT 到一个固定的 `.../setting/new` 路径。
@@ -1027,13 +1348,28 @@ impl ApiClient {
             b["merger"] = json!(merger);
         }
         self.put(
-            &format!("/repos/{}/{}/branches/{}/setting", owner, name, enc(wildcard)),
+            &format!(
+                "/repos/{}/{}/branches/{}/setting",
+                owner,
+                name,
+                enc(wildcard)
+            ),
             &b,
         )
     }
 
-    pub fn delete_branch_protect_rule(&self, owner: &str, name: &str, wildcard: &str) -> Result<Value> {
-        self.delete(&format!("/repos/{}/{}/branches/{}/setting", owner, name, enc(wildcard)))
+    pub fn delete_branch_protect_rule(
+        &self,
+        owner: &str,
+        name: &str,
+        wildcard: &str,
+    ) -> Result<Value> {
+        self.delete(&format!(
+            "/repos/{}/{}/branches/{}/setting",
+            owner,
+            name,
+            enc(wildcard)
+        ))
     }
 
     // -- 提交 --
@@ -1047,23 +1383,44 @@ impl ApiClient {
         page: u64,
         per_page: u64,
     ) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/commits", owner, name), page, per_page, filters)
+        self.get_paged(
+            &format!("/repos/{}/{}/commits", owner, name),
+            page,
+            per_page,
+            filters,
+        )
     }
 
     pub fn commit(&self, owner: &str, name: &str, sha: &str) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/commits/{}", owner, name, enc(sha)), &[])
+        self.get(
+            &format!("/repos/{}/{}/commits/{}", owner, name, enc(sha)),
+            &[],
+        )
     }
 
     /// 提交的 diff 文本。路径是单数 `commit`，和上面的 `commits` 不是一回事。
     pub fn commit_diff(&self, owner: &str, name: &str, sha: &str) -> Result<String> {
-        self.request_text(&format!("/repos/{}/{}/commit/{}/diff", owner, name, enc(sha)), &[])
+        self.request_text(
+            &format!("/repos/{}/{}/commit/{}/diff", owner, name, enc(sha)),
+            &[],
+        )
     }
 
     pub fn commit_patch(&self, owner: &str, name: &str, sha: &str) -> Result<String> {
-        self.request_text(&format!("/repos/{}/{}/commit/{}/patch", owner, name, enc(sha)), &[])
+        self.request_text(
+            &format!("/repos/{}/{}/commit/{}/patch", owner, name, enc(sha)),
+            &[],
+        )
     }
 
-    pub fn commit_comments(&self, owner: &str, name: &str, r#ref: &str, page: u64, per_page: u64) -> Result<Value> {
+    pub fn commit_comments(
+        &self,
+        owner: &str,
+        name: &str,
+        r#ref: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
         self.get_paged(
             &format!("/repos/{}/{}/commits/{}/comments", owner, name, enc(r#ref)),
             page,
@@ -1072,7 +1429,13 @@ impl ApiClient {
         )
     }
 
-    pub fn create_commit_comment(&self, owner: &str, name: &str, sha: &str, body: &str) -> Result<Value> {
+    pub fn create_commit_comment(
+        &self,
+        owner: &str,
+        name: &str,
+        sha: &str,
+        body: &str,
+    ) -> Result<Value> {
         self.post(
             &format!("/repos/{}/{}/commits/{}/comments", owner, name, enc(sha)),
             &json!({ "body": body }),
@@ -1080,9 +1443,21 @@ impl ApiClient {
     }
 
     /// 对比两个引用。v5 把范围塞在路径里：`compare/{base}...{head}`。
-    pub fn compare_commits(&self, owner: &str, name: &str, base: &str, head: &str) -> Result<Value> {
+    pub fn compare_commits(
+        &self,
+        owner: &str,
+        name: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<Value> {
         self.get(
-            &format!("/repos/{}/{}/compare/{}...{}", owner, name, enc(base), enc(head)),
+            &format!(
+                "/repos/{}/{}/compare/{}...{}",
+                owner,
+                name,
+                enc(base),
+                enc(head)
+            ),
             &[],
         )
     }
@@ -1099,13 +1474,21 @@ impl ApiClient {
     /// 读文件或列目录：路径指向文件就返回文件对象（content 为 base64），
     /// 指向目录就返回条目数组。
     pub fn contents(&self, owner: &str, name: &str, path: &str, r#ref: &str) -> Result<Value> {
-        let q: Vec<(&str, &str)> = if r#ref.is_empty() { vec![] } else { vec![("ref", r#ref)] };
+        let q: Vec<(&str, &str)> = if r#ref.is_empty() {
+            vec![]
+        } else {
+            vec![("ref", r#ref)]
+        };
         self.get(&Self::contents_path(owner, name, path), &q)
     }
 
     /// 直接取文件原文（不经 base64）。
     pub fn raw_file(&self, owner: &str, name: &str, path: &str, r#ref: &str) -> Result<String> {
-        let q: Vec<(&str, &str)> = if r#ref.is_empty() { vec![] } else { vec![("ref", r#ref)] };
+        let q: Vec<(&str, &str)> = if r#ref.is_empty() {
+            vec![]
+        } else {
+            vec![("ref", r#ref)]
+        };
         self.request_text(
             &format!("/repos/{}/{}/raw/{}", owner, name, enc_path(path)),
             &q,
@@ -1172,7 +1555,12 @@ impl ApiClient {
 
     // -- 标签 --
     pub fn list_tags(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/tags", owner, name), page, per_page, &[])
+        self.get_paged(
+            &format!("/repos/{}/{}/tags", owner, name),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn get_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
@@ -1180,7 +1568,14 @@ impl ApiClient {
     }
 
     /// 新建标签。`tag_name` 是新标签名，`refs` 是起点（SHA / 分支 / 已有标签）。
-    pub fn create_tag(&self, owner: &str, name: &str, refs: &str, tag_name: &str, message: &str) -> Result<Value> {
+    pub fn create_tag(
+        &self,
+        owner: &str,
+        name: &str,
+        refs: &str,
+        tag_name: &str,
+        message: &str,
+    ) -> Result<Value> {
         let mut b = json!({ "refs": refs, "tag_name": tag_name });
         if !message.is_empty() {
             b["tag_message"] = json!(message);
@@ -1194,23 +1589,51 @@ impl ApiClient {
 
     /// 把某个标签设为受保护（只能删保护规则，不能删标签本身）。
     pub fn protect_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
-        self.put(&format!("/repos/{}/{}/tags/{}/protection", owner, name, enc(tag)), &json!({}))
+        self.put(
+            &format!("/repos/{}/{}/tags/{}/protection", owner, name, enc(tag)),
+            &json!({}),
+        )
     }
 
     pub fn unprotect_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
-        self.delete(&format!("/repos/{}/{}/tags/{}/protection", owner, name, enc(tag)))
+        self.delete(&format!(
+            "/repos/{}/{}/tags/{}/protection",
+            owner,
+            name,
+            enc(tag)
+        ))
     }
 
-    pub fn list_protected_tags(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/protected_tags", owner, name), page, per_page, &[])
+    pub fn list_protected_tags(
+        &self,
+        owner: &str,
+        name: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        self.get_paged(
+            &format!("/repos/{}/{}/protected_tags", owner, name),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn get_protected_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/protected_tags/{}", owner, name, enc(tag)), &[])
+        self.get(
+            &format!("/repos/{}/{}/protected_tags/{}", owner, name, enc(tag)),
+            &[],
+        )
     }
 
     /// 新建受保护标签规则。`access_level` 为 0 表示不指定级别。
-    pub fn create_protected_tag(&self, owner: &str, name: &str, tag: &str, access_level: u64) -> Result<Value> {
+    pub fn create_protected_tag(
+        &self,
+        owner: &str,
+        name: &str,
+        tag: &str,
+        access_level: u64,
+    ) -> Result<Value> {
         let mut b = json!({ "name": tag });
         if access_level > 0 {
             b["create_access_level"] = json!(access_level);
@@ -1218,7 +1641,13 @@ impl ApiClient {
         self.post(&format!("/repos/{}/{}/protected_tags", owner, name), &b)
     }
 
-    pub fn update_protected_tag(&self, owner: &str, name: &str, tag: &str, access_level: u64) -> Result<Value> {
+    pub fn update_protected_tag(
+        &self,
+        owner: &str,
+        name: &str,
+        tag: &str,
+        access_level: u64,
+    ) -> Result<Value> {
         self.put(
             &format!("/repos/{}/{}/protected_tags", owner, name),
             &json!({ "name": tag, "create_access_level": access_level }),
@@ -1226,12 +1655,22 @@ impl ApiClient {
     }
 
     pub fn delete_protected_tag(&self, owner: &str, name: &str, tag: &str) -> Result<Value> {
-        self.delete(&format!("/repos/{}/{}/protected_tags/{}", owner, name, enc(tag)))
+        self.delete(&format!(
+            "/repos/{}/{}/protected_tags/{}",
+            owner,
+            name,
+            enc(tag)
+        ))
     }
 
     // -- Webhook --
     pub fn list_hooks(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/hooks", owner, name), page, per_page, &[])
+        self.get_paged(
+            &format!("/repos/{}/{}/hooks", owner, name),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn get_hook(&self, owner: &str, name: &str, id: u64) -> Result<Value> {
@@ -1253,11 +1692,19 @@ impl ApiClient {
 
     // -- 标签（issue/PR 用的 label）--
     pub fn list_labels(&self, owner: &str, name: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/repos/{}/{}/labels", owner, name), page, per_page, &[])
+        self.get_paged(
+            &format!("/repos/{}/{}/labels", owner, name),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn get_label(&self, owner: &str, name: &str, label: &str) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/labels/{}", owner, name, enc(label)), &[])
+        self.get(
+            &format!("/repos/{}/{}/labels/{}", owner, name, enc(label)),
+            &[],
+        )
     }
 
     /// `body`: {"name":..,"color":..,"description":..}
@@ -1265,8 +1712,17 @@ impl ApiClient {
         self.post(&format!("/repos/{}/{}/labels", owner, name), body)
     }
 
-    pub fn update_label(&self, owner: &str, name: &str, label: &str, body: &Value) -> Result<Value> {
-        self.patch(&format!("/repos/{}/{}/labels/{}", owner, name, enc(label)), body)
+    pub fn update_label(
+        &self,
+        owner: &str,
+        name: &str,
+        label: &str,
+        body: &Value,
+    ) -> Result<Value> {
+        self.patch(
+            &format!("/repos/{}/{}/labels/{}", owner, name, enc(label)),
+            body,
+        )
     }
 
     pub fn delete_label(&self, owner: &str, name: &str, label: &str) -> Result<Value> {
@@ -1274,13 +1730,32 @@ impl ApiClient {
     }
 
     // -- 里程碑 --
-    pub fn list_milestones(&self, owner: &str, name: &str, state: &str, page: u64, per_page: u64) -> Result<Value> {
-        let q: Vec<(&str, &str)> = if state.is_empty() { vec![] } else { vec![("state", state)] };
-        self.get_paged(&format!("/repos/{}/{}/milestones", owner, name), page, per_page, &q)
+    pub fn list_milestones(
+        &self,
+        owner: &str,
+        name: &str,
+        state: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if state.is_empty() {
+            vec![]
+        } else {
+            vec![("state", state)]
+        };
+        self.get_paged(
+            &format!("/repos/{}/{}/milestones", owner, name),
+            page,
+            per_page,
+            &q,
+        )
     }
 
     pub fn get_milestone(&self, owner: &str, name: &str, number: u64) -> Result<Value> {
-        self.get(&format!("/repos/{}/{}/milestones/{}", owner, name, number), &[])
+        self.get(
+            &format!("/repos/{}/{}/milestones/{}", owner, name, number),
+            &[],
+        )
     }
 
     /// `body`: {"title":..,"state":..,"description":..,"due_on":..}
@@ -1288,8 +1763,17 @@ impl ApiClient {
         self.post(&format!("/repos/{}/{}/milestones", owner, name), body)
     }
 
-    pub fn update_milestone(&self, owner: &str, name: &str, number: u64, body: &Value) -> Result<Value> {
-        self.patch(&format!("/repos/{}/{}/milestones/{}", owner, name, number), body)
+    pub fn update_milestone(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+        body: &Value,
+    ) -> Result<Value> {
+        self.patch(
+            &format!("/repos/{}/{}/milestones/{}", owner, name, number),
+            body,
+        )
     }
 
     pub fn delete_milestone(&self, owner: &str, name: &str, number: u64) -> Result<Value> {
@@ -1297,17 +1781,35 @@ impl ApiClient {
     }
 
     // -- 协作者 --
-    pub fn list_collaborators(&self, owner: &str, name: &str, affiliation: &str, page: u64, per_page: u64) -> Result<Value> {
+    pub fn list_collaborators(
+        &self,
+        owner: &str,
+        name: &str,
+        affiliation: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
         let q: Vec<(&str, &str)> = if affiliation.is_empty() {
             vec![]
         } else {
             vec![("affiliation", affiliation)]
         };
-        self.get_paged(&format!("/repos/{}/{}/collaborators", owner, name), page, per_page, &q)
+        self.get_paged(
+            &format!("/repos/{}/{}/collaborators", owner, name),
+            page,
+            per_page,
+            &q,
+        )
     }
 
     /// `permission` 为 "" 时不传级别。
-    pub fn add_collaborator(&self, owner: &str, name: &str, username: &str, permission: &str) -> Result<Value> {
+    pub fn add_collaborator(
+        &self,
+        owner: &str,
+        name: &str,
+        username: &str,
+        permission: &str,
+    ) -> Result<Value> {
         let mut b = json!({});
         if !permission.is_empty() {
             b["permission"] = json!(permission);
@@ -1319,12 +1821,27 @@ impl ApiClient {
     }
 
     pub fn remove_collaborator(&self, owner: &str, name: &str, username: &str) -> Result<Value> {
-        self.delete(&format!("/repos/{}/{}/collaborators/{}", owner, name, enc(username)))
+        self.delete(&format!(
+            "/repos/{}/{}/collaborators/{}",
+            owner,
+            name,
+            enc(username)
+        ))
     }
 
-    pub fn collaborator_permission(&self, owner: &str, name: &str, username: &str) -> Result<Value> {
+    pub fn collaborator_permission(
+        &self,
+        owner: &str,
+        name: &str,
+        username: &str,
+    ) -> Result<Value> {
         self.get(
-            &format!("/repos/{}/{}/collaborators/{}/permission", owner, name, enc(username)),
+            &format!(
+                "/repos/{}/{}/collaborators/{}/permission",
+                owner,
+                name,
+                enc(username)
+            ),
             &[],
         )
     }
@@ -1338,13 +1855,33 @@ impl ApiClient {
         self.get(&format!("/orgs/{}", enc(org)), &[])
     }
 
-    pub fn list_org_members(&self, org: &str, role: &str, page: u64, per_page: u64) -> Result<Value> {
-        let q: Vec<(&str, &str)> = if role.is_empty() { vec![] } else { vec![("role", role)] };
+    pub fn list_org_members(
+        &self,
+        org: &str,
+        role: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if role.is_empty() {
+            vec![]
+        } else {
+            vec![("role", role)]
+        };
         self.get_paged(&format!("/orgs/{}/members", enc(org)), page, per_page, &q)
     }
 
-    pub fn list_org_repos(&self, org: &str, r#type: &str, page: u64, per_page: u64) -> Result<Value> {
-        let q: Vec<(&str, &str)> = if r#type.is_empty() { vec![] } else { vec![("type", r#type)] };
+    pub fn list_org_repos(
+        &self,
+        org: &str,
+        r#type: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
+        let q: Vec<(&str, &str)> = if r#type.is_empty() {
+            vec![]
+        } else {
+            vec![("type", r#type)]
+        };
         self.get_paged(&format!("/orgs/{}/repos", enc(org)), page, per_page, &q)
     }
 
@@ -1352,15 +1889,32 @@ impl ApiClient {
     // 注意：本段走 v5 + PAT（与网页端 v1 的 `User` 命令不是同一套接口）。
 
     pub fn user_followers(&self, username: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/users/{}/followers", enc(username)), page, per_page, &[])
+        self.get_paged(
+            &format!("/users/{}/followers", enc(username)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     pub fn user_following(&self, username: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/users/{}/following", enc(username)), page, per_page, &[])
+        self.get_paged(
+            &format!("/users/{}/following", enc(username)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     /// `username` 为空时查「我 Star 的仓库」，否则查指定用户的。
-    pub fn user_starred(&self, username: &str, sort: &str, direction: &str, page: u64, per_page: u64) -> Result<Value> {
+    pub fn user_starred(
+        &self,
+        username: &str,
+        sort: &str,
+        direction: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
         let mut q: Vec<(&str, &str)> = vec![];
         if !sort.is_empty() {
             q.push(("sort", sort));
@@ -1371,12 +1925,24 @@ impl ApiClient {
         if username.is_empty() {
             self.get_paged("/user/starred", page, per_page, &q)
         } else {
-            self.get_paged(&format!("/users/{}/starred", enc(username)), page, per_page, &q)
+            self.get_paged(
+                &format!("/users/{}/starred", enc(username)),
+                page,
+                per_page,
+                &q,
+            )
         }
     }
 
     /// 与 `user_starred` 同理，区分「我订阅的」与「某人订阅的」。
-    pub fn user_subscriptions(&self, username: &str, sort: &str, direction: &str, page: u64, per_page: u64) -> Result<Value> {
+    pub fn user_subscriptions(
+        &self,
+        username: &str,
+        sort: &str,
+        direction: &str,
+        page: u64,
+        per_page: u64,
+    ) -> Result<Value> {
         let mut q: Vec<(&str, &str)> = vec![];
         if !sort.is_empty() {
             q.push(("sort", sort));
@@ -1387,12 +1953,21 @@ impl ApiClient {
         if username.is_empty() {
             self.get_paged("/user/subscriptions", page, per_page, &q)
         } else {
-            self.get_paged(&format!("/users/{}/subscriptions", enc(username)), page, per_page, &q)
+            self.get_paged(
+                &format!("/users/{}/subscriptions", enc(username)),
+                page,
+                per_page,
+                &q,
+            )
         }
     }
 
     pub fn user_namespaces(&self, mode: &str, page: u64, per_page: u64) -> Result<Value> {
-        let q: Vec<(&str, &str)> = if mode.is_empty() { vec![] } else { vec![("mode", mode)] };
+        let q: Vec<(&str, &str)> = if mode.is_empty() {
+            vec![]
+        } else {
+            vec![("mode", mode)]
+        };
         self.get_paged("/user/namespaces", page, per_page, &q)
     }
 
@@ -1523,7 +2098,12 @@ impl ApiClient {
 
     /// 列出指定用户所属的组织（区别于 `list_orgs` 的「我自己所属」）。
     pub fn user_orgs_by_username(&self, username: &str, page: u64, per_page: u64) -> Result<Value> {
-        self.get_paged(&format!("/users/{}/orgs", enc(username)), page, per_page, &[])
+        self.get_paged(
+            &format!("/users/{}/orgs", enc(username)),
+            page,
+            per_page,
+            &[],
+        )
     }
 
     // ---- 搜索 ----
@@ -1576,8 +2156,7 @@ fn protect_body_from(saved: &Value) -> Value {
 
 /// 讨论接口基址，可用 GITCODE_WEB_BASE 覆盖（默认网页端）
 pub fn web_base() -> String {
-    std::env::var("GITCODE_WEB_BASE")
-        .unwrap_or_else(|_| "https://web-api.gitcode.com".to_string())
+    std::env::var("GITCODE_WEB_BASE").unwrap_or_else(|_| "https://web-api.gitcode.com".to_string())
 }
 
 /// 全站搜索支持的类型。
@@ -1989,7 +2568,10 @@ mod tests {
             "description": "",
             "description_cn": "中文简介",
         }]});
-        assert_eq!(search_digest(&raw, "repo")["items"][0]["description"], "中文简介");
+        assert_eq!(
+            search_digest(&raw, "repo")["items"][0]["description"],
+            "中文简介"
+        );
     }
 
     #[test]
@@ -2015,7 +2597,11 @@ mod tests {
 
     #[test]
     fn search_digest_survives_missing_and_empty_content() {
-        for raw in [json!({}), json!({ "content": [] }), json!({ "content": null })] {
+        for raw in [
+            json!({}),
+            json!({ "content": [] }),
+            json!({ "content": null }),
+        ] {
             let d = search_digest(&raw, "repo");
             assert_eq!(d["count"], 0);
             assert_eq!(d["total"], 0);
@@ -2027,7 +2613,10 @@ mod tests {
     fn enc_path_keeps_slashes_but_escapes_the_rest() {
         // 斜杠必须原样保留，否则 contents/{path} 会被当成单个文件名。
         assert_eq!(enc_path("src/api.rs"), "src/api%2Ers");
-        assert_eq!(enc_path("docs/我的 文档.md"), "docs/%E6%88%91%E7%9A%84%20%E6%96%87%E6%A1%A3%2Emd");
+        assert_eq!(
+            enc_path("docs/我的 文档.md"),
+            "docs/%E6%88%91%E7%9A%84%20%E6%96%87%E6%A1%A3%2Emd"
+        );
         // 整串编码是错的写法，这里确认两者确实不同。
         assert_ne!(enc_path("a/b"), enc("a/b"));
     }
@@ -2051,10 +2640,7 @@ mod tests {
             "other/d.rs".to_string(),
         ];
         let got = filter_subtree(&files, "src");
-        assert_eq!(
-            got,
-            vec!["b.rs".to_string(), "x/c.rs".to_string()]
-        );
+        assert_eq!(got, vec!["b.rs".to_string(), "x/c.rs".to_string()]);
     }
 
     #[test]
@@ -2203,7 +2789,11 @@ fn download_one(
         .context("请求 GitCode 文件内容接口失败")?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(anyhow!("文件内容接口错误 {}: {:?}", status, status.canonical_reason()));
+        return Err(anyhow!(
+            "文件内容接口错误 {}: {:?}",
+            status,
+            status.canonical_reason()
+        ));
     }
     // 流式解析 JSON 响应体（HTTP body 边收边解析），得到 WebFile
     let wf = serde_json::from_reader::<_, WebFile>(resp).context("解析文件内容响应失败")?;
@@ -2400,7 +2990,12 @@ pub fn sync_repo(token: &str, owner: &str, name: &str, branch: &str) -> Result<(
 /// 查询 fork 同步任务状态（网页端 v2 接口：GET /api/v2/projects/{owner%2Fname}/sync_repo?branch）
 /// 返回 (repo_sync_result, repo_sync_message)；result=true 且 message="success" 表示完成。
 /// branch 与提交时一致：空字符串用 `?branch`，否则 `?branch=<分支>`（做百分号编码）。
-pub fn sync_repo_status(token: &str, owner: &str, name: &str, branch: &str) -> Result<(bool, String)> {
+pub fn sync_repo_status(
+    token: &str,
+    owner: &str,
+    name: &str,
+    branch: &str,
+) -> Result<(bool, String)> {
     let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname
@@ -2669,7 +3264,11 @@ pub fn issue_reopen(token: &str, owner: &str, name: &str, iid: u64) -> Result<Va
     let status = resp.status();
     let text = resp.text().context("读取响应体失败")?;
     if !status.is_success() {
-        return Err(anyhow!("GitCode 重新打开 Issue 接口错误 {}: {}", status, text));
+        return Err(anyhow!(
+            "GitCode 重新打开 Issue 接口错误 {}: {}",
+            status,
+            text
+        ));
     }
     serde_json::from_str(&text).context("解析重新打开 Issue 响应失败")
 }
@@ -2863,7 +3462,11 @@ pub fn pr_list_web(
     let status = resp.status();
     let text = resp.text().context("读取响应体失败")?;
     if !status.is_success() {
-        return Err(anyhow!("GitCode PR 列表（网页端）接口错误 {}: {}", status, text));
+        return Err(anyhow!(
+            "GitCode PR 列表（网页端）接口错误 {}: {}",
+            status,
+            text
+        ));
     }
     serde_json::from_str(&text).context("解析 PR 列表（网页端）响应失败")
 }
@@ -2903,7 +3506,11 @@ pub fn pr_list_count(token: &str, owner: &str, name: &str, state: &str) -> Resul
     let status = resp.status();
     let text = resp.text().context("读取响应体失败")?;
     if !status.is_success() {
-        return Err(anyhow!("GitCode PR 统计（网页端）接口错误 {}: {}", status, text));
+        return Err(anyhow!(
+            "GitCode PR 统计（网页端）接口错误 {}: {}",
+            status,
+            text
+        ));
     }
     serde_json::from_str(&text).context("解析 PR 统计（网页端）响应失败")
 }
@@ -2998,10 +3605,16 @@ pub fn issue_edit(
     let path_seg = repo_path.replace('/', "%2F"); // owner%2Fname（路径段，单次编码）
     let mut body = serde_json::Map::new();
     if let Some(t) = title {
-        body.insert("title".to_string(), serde_json::Value::String(t.to_string()));
+        body.insert(
+            "title".to_string(),
+            serde_json::Value::String(t.to_string()),
+        );
     }
     if let Some(d) = description {
-        body.insert("description".to_string(), serde_json::Value::String(d.to_string()));
+        body.insert(
+            "description".to_string(),
+            serde_json::Value::String(d.to_string()),
+        );
     }
     let url = format!(
         "{}/issuepr/api/v1/issue/{}/issues/{}",
@@ -3043,7 +3656,8 @@ pub fn issue_attachment_upload(
     let client = web_client()?;
     let repo_path = format!("{}/{}", owner, name);
     let repo_id = repo_path.replace('/', "%252F"); // owner%252Fname（二次编码）
-    let bytes = std::fs::read(file_path).map_err(|e| anyhow!("读取附件 {} 失败: {}", file_path.display(), e))?;
+    let bytes = std::fs::read(file_path)
+        .map_err(|e| anyhow!("读取附件 {} 失败: {}", file_path.display(), e))?;
     let fname = file_path
         .file_name()
         .and_then(|s| s.to_str())
@@ -3164,7 +3778,9 @@ pub fn refresh_web_token(access: &str, refresh: &str) -> Result<(String, String)
 
     // 优先从 JSON body 取
     if let Ok(v) = serde_json::from_str::<Value>(&text) {
-        let a = v["access_token"].as_str().or_else(|| v["accessToken"].as_str());
+        let a = v["access_token"]
+            .as_str()
+            .or_else(|| v["accessToken"].as_str());
         let r = v["refresh_token"]
             .as_str()
             .or_else(|| v["refreshToken"].as_str());

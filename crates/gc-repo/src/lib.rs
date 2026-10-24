@@ -7,3 +7,6 @@ pub use gc_core::api::{
     fork_repo, repo_compare, repo_file_content, repo_file_list, star_repo, sync_repo,
     sync_repo_status, unstar_repo, update_project_v2, wiki_create, WebFile,
 };
+
+pub use gc_core::api;
+pub mod cli;
