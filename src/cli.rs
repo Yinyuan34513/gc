@@ -970,7 +970,11 @@ enum AuthAction {
     },
     /// 供 git credential helper 调用（勿手动使用）
     #[command(hide = true)]
-    Credential,
+    Credential {
+        /// git 传入的操作：get / store / erase（git 调用 helper 时必带）
+        #[arg(default_value = "get")]
+        operation: String,
+    },
 }
 
 #[derive(Parser)]
@@ -1790,8 +1794,13 @@ pub fn run() -> Result<()> {
                 }
                 println!("之后 git push/pull gitcode.com / atomgit.com 将自动使用 gc 的 PAT，无需再配置凭据。");
             }
-            Some(AuthAction::Credential) => {
-                // git credential helper 协议：stdin 收到请求（含 host=...），stdout 输出键值对
+            Some(AuthAction::Credential { operation }) => {
+                // git credential helper 协议：helper 以 `gc auth credential <get|store|erase>` 调用，
+                // stdin 收到请求（含 host=...），stdout 输出键值对。
+                // store / erase 无事可做（token 常驻 gc 配置），直接成功退出。
+                if operation != "get" {
+                    return Ok(());
+                }
                 use std::io::Read;
                 let mut input = String::new();
                 let _ = std::io::stdin().read_to_string(&mut input);
