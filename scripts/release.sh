@@ -52,7 +52,9 @@ step "前置检查"
 [ -z "$(git status --porcelain)" ] || die "工作区有未提交改动，先 commit 或 stash"
 echo "✓ 工作区干净"
 
-git fetch -q origin github
+for remote in origin github; do
+  git fetch -q "$remote" || die "git fetch $remote 失败（网络问题？），中止"
+done
 for remote in origin github; do
   git rev-parse --verify "$remote/main" >/dev/null 2>&1 ||
     die "远端 $remote 不存在（git remote -v 查看）"
