@@ -1,0 +1,64 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (cargo publish --dry-run，不真正发布)"
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt -- --check
+      - run: cargo test --workspace
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # tag 必须与 workspace 版本一致，防止打错 tag 发布错版本
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG=${GITHUB_REF#refs/tags/v}
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag: v$TAG  workspace version: v$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG 与 Cargo.toml 版本 $VERSION 不一致"
+            exit 1
+          fi
+
+      # dry-run 模式只验证打包，不发布
+      - name: Compute publish flags
+        id: flags
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "args=--dry-run" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 依赖拓扑顺序：叶子 → 域层 → CLI 层 → 主包
+      # cargo publish 本身会等待上一个版本在索引里就绪，串行即可
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -e
+          for c in gc-core gc-search gc-grep gc-skill gc-issues gc-repo gc-mcp gc-pr gc-cli gitcode-gc; do
+            echo "::group::publish $c"
+            cargo publish -p "$c" ${{ steps.flags.outputs.args }}
+            echo "::endgroup::"
+            sleep 5
+          done
