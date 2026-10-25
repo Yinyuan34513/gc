@@ -100,7 +100,7 @@ gc install --system  # 安装二进制到 /usr/local/bin（自动 sudo）
 ```bash
 # 仓库
 gc repo view <owner/name>            # 摘要 + README/LICENSE
-gc repo create <name> --private      # 建仓
+gc repo create <name> --private      # 建仓（--set-remote 建完把当前 git 仓库远程指向新仓）
 gc repo grep "<regex>" --include=*.rs --repo owner/name   # 内容搜索（SHA 缓存增量下载）
 
 # Issue / PR（仓库参数可省略：在 git 仓库内自动推断）

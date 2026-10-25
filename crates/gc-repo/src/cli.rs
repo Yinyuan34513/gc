@@ -112,6 +112,16 @@ pub enum RepoAction {
         /// 是否设为私有仓库
         #[arg(long)]
         private: bool,
+        /// 创建成功后把当前 git 仓库的远程指向新仓库
+        ///（可带远程名：--set-remote=upstream；不带值默认 origin）
+        #[arg(
+            long,
+            value_name = "NAME",
+            num_args = 0..=1,
+            default_missing_value = "origin",
+            require_equals = true
+        )]
+        set_remote: Option<String>,
     },
     /// Fork 仓库到当前用户命名空间（网页端 v2 接口）；加 --org 则 fork 进组织（v5 接口）
     Fork {
@@ -487,6 +497,7 @@ pub fn run(action: RepoAction, api: &ApiClient) -> anyhow::Result<()> {
             name,
             description,
             private,
+            set_remote,
         } => {
             let v = api.create_repo(&name, &description, private)?;
             let full = v["full_name"].as_str().unwrap_or(&name);
@@ -504,6 +515,9 @@ pub fn run(action: RepoAction, api: &ApiClient) -> anyhow::Result<()> {
                         .then_some(http.to_string())
                         .unwrap_or_else(|| format!("{}.git", http))
                 );
+            }
+            if let Some(remote) = set_remote {
+                set_repo_remote(full, &remote)?;
             }
         }
         RepoAction::Fork {
@@ -1213,6 +1227,49 @@ pub fn run_download(
     Ok(())
 }
 
+/// create 后把当前 git 仓库的远程指向新仓库（gh repo create --set-remote 风格）。
+/// 仅在当前目录是 git 仓库时生效；同名远程已存在则跳过（不覆盖用户配置）。
+pub fn set_repo_remote(full_name: &str, remote: &str) -> anyhow::Result<()> {
+    let dir = std::env::current_dir().map_err(|e| anyhow!("读取当前目录失败: {}", e))?;
+    add_git_remote(&dir, full_name, remote)
+}
+
+/// 在指定目录的 git 仓库里添加指向 full_name 的远程（测试入口，不依赖进程 cwd）。
+fn add_git_remote(dir: &std::path::Path, full_name: &str, remote: &str) -> anyhow::Result<()> {
+    let in_git = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !in_git {
+        eprintln!("⚠ --set-remote 需要在 git 仓库目录内执行（当前目录不是 git 仓库），已跳过");
+        return Ok(());
+    }
+    let (owner, name) = split_repo(full_name)?;
+    let url = config::clone_url(&owner, &name);
+    let existing = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["remote", "get-url", remote])
+        .output();
+    if existing.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("⚠ 远程 {remote} 已存在，跳过（未覆盖原有配置）");
+        return Ok(());
+    }
+    let status = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["remote", "add", remote, &url])
+        .status()
+        .map_err(|e| anyhow!("执行 git remote add 失败: {}", e))?;
+    if status.success() {
+        println!("已在当前仓库添加远程 {remote} -> {url}");
+        println!("推送: git push -u {remote} HEAD");
+    } else {
+        eprintln!("⚠ 添加远程 {remote} 失败: {url}");
+    }
+    Ok(())
+}
+
 /// fork 后在当前 git 仓库里添加 upstream 远程（指向源仓库 owner/name）。
 /// 不自动克隆：仅在当前目录已是 git 仓库时生效；upstream 已存在则跳过。
 pub fn link_upstream_remote(repo: &str) -> anyhow::Result<()> {
@@ -1245,6 +1302,67 @@ pub fn link_upstream_remote(repo: &str) -> anyhow::Result<()> {
         eprintln!("⚠ 添加 upstream 失败: {}", source_url);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn remote_url(dir: &std::path::Path, remote: &str) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["remote", "get-url", remote])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn test_add_git_remote_in_temp_repo() {
+        let dir = std::env::temp_dir().join(format!("gc-repo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(git_ok(&dir, &["init", "-q"]));
+        // 先手工建一个指向别处的 origin
+        assert!(git_ok(
+            &dir,
+            &["remote", "add", "origin", "https://example.com/other.git"]
+        ));
+        // 已存在的同名远程：跳过且不覆盖
+        add_git_remote(&dir, "alice/demo", "origin").unwrap();
+        assert_eq!(remote_url(&dir, "origin"), "https://example.com/other.git");
+        // 自定义远程名：正常添加
+        add_git_remote(&dir, "alice/demo", "mine").unwrap();
+        assert_eq!(
+            remote_url(&dir, "mine"),
+            "https://gitcode.com/alice/demo.git"
+        );
+        add_git_remote(&dir, "bob/app", "upstream").unwrap();
+        assert_eq!(
+            remote_url(&dir, "upstream"),
+            "https://gitcode.com/bob/app.git"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_add_git_remote_outside_git_repo_warns_only() {
+        // 非 git 目录：返回 Ok（只警告），不 panic
+        let dir = std::env::temp_dir().join(format!("gc-nogit-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        add_git_remote(&dir, "alice/demo", "origin").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 拉取仓库单个文本文件（v5）：
