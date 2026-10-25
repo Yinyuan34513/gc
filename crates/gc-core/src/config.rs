@@ -2,14 +2,21 @@ use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::path::Path;
 
-/// 多用户令牌档案：一个名字 + 一个 PAT（可带备注）。
+/// 多用户令牌档案：一个身份 = PAT（v5）+ 网页端 JWT 对（v1/v2），可带备注。
 /// `gc auth user list` 的编号即 users 数组下标 + 1。
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct UserProfile {
     /// 用户名 / 备注名（`gc auth switch` 按列表序号切换）
     pub name: String,
-    /// GitCode 个人访问令牌
-    pub token: String,
+    /// GitCode 个人访问令牌（v5 API）；可为空（只用网页端接口的档案）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// 网页端 access JWT（讨论 / Issue v2 等 v1 接口）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_token: Option<String>,
+    /// 网页端 refresh JWT（`gc refresh` 用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_refresh: Option<String>,
     /// 备注（账号用途等）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -48,16 +55,35 @@ impl TomlConfig {
     }
 
     /// 旧版单 token → default 用户（内存迁移，落盘由后续 save 完成）；
+    /// 旧版单 web token 对附加到第一个档案；
     /// active_user 指向已删除用户时回退到第一个用户。
     fn migrate(&mut self) {
         if self.users.is_empty() {
             if let Some(t) = self.token.take().filter(|t| !t.trim().is_empty()) {
                 self.users.push(UserProfile {
                     name: DEFAULT_USER.to_string(),
-                    token: t,
+                    token: Some(t),
+                    web_token: None,
+                    web_refresh: None,
                     note: None,
                 });
                 self.active_user = Some(DEFAULT_USER.to_string());
+            }
+        }
+        // 旧版单 web token 对 → 附加到第一个档案（该档案没有 web 对时）
+        if let (Some(a), Some(r)) = (self.web_token.take(), self.web_refresh.take()) {
+            if !a.trim().is_empty() && !r.trim().is_empty() {
+                match self.users.first_mut() {
+                    Some(u) if u.web_token.is_none() => {
+                        u.web_token = Some(a);
+                        u.web_refresh = Some(r);
+                    }
+                    _ => {
+                        // 没有任何档案可依附：放回旧字段，load_web_tokens 走兜底
+                        self.web_token = Some(a);
+                        self.web_refresh = Some(r);
+                    }
+                }
             }
         }
         let active_missing = self
@@ -119,7 +145,10 @@ pub fn load_token() -> Result<Option<String>> {
         }
     }
     let cfg = read_config(&config_path()?)?;
-    Ok(cfg.active().map(|u| u.token.clone()))
+    Ok(cfg
+        .active()
+        .and_then(|u| u.token.clone())
+        .filter(|t| !t.trim().is_empty()))
 }
 
 /// 保存 API token 到**当前激活用户**（没有任何用户时创建 default 用户）。
@@ -138,7 +167,9 @@ fn save_token_at(path: &Path, token: &str) -> Result<String> {
     if cfg.users.is_empty() {
         cfg.users.push(UserProfile {
             name: DEFAULT_USER.to_string(),
-            token: token.to_string(),
+            token: Some(token.to_string()),
+            web_token: None,
+            web_refresh: None,
             note: None,
         });
         cfg.active_user = Some(DEFAULT_USER.to_string());
@@ -147,12 +178,49 @@ fn save_token_at(path: &Path, token: &str) -> Result<String> {
         .iter_mut()
         .find(|u| Some(&u.name) == active.as_ref())
     {
-        u.token = token.to_string();
+        u.token = Some(token.to_string());
     } else {
-        cfg.users[0].token = token.to_string();
+        cfg.users[0].token = Some(token.to_string());
         cfg.active_user = Some(cfg.users[0].name.clone());
     }
     cfg.token = None; // 已迁移进 users，清除旧字段（单一数据源）
+    write_config(path, &cfg)?;
+    Ok(token.to_string())
+}
+
+/// upsert 方式保存 token 到指定用户档案（不存在则创建，存在则更新），并切换为激活用户。
+/// name 为 None 时等价于 save_token（写当前激活用户）。
+/// 与 add_user 的重名拒绝互补：这里是「登录到该账号」，重复登录即更新。
+pub fn save_token_for(name: Option<&str>, token: &str) -> Result<String> {
+    match name {
+        None => save_token(token),
+        Some(name) => save_token_as_at(&config_path()?, name, token),
+    }
+}
+
+fn save_token_as_at(path: &Path, name: &str, token: &str) -> Result<String> {
+    let name = name.trim();
+    let token = token.trim();
+    if name.is_empty() {
+        anyhow::bail!("用户名为空");
+    }
+    if token.is_empty() {
+        anyhow::bail!("token 为空，已取消");
+    }
+    let mut cfg = read_config(path)?;
+    if let Some(u) = cfg.users.iter_mut().find(|u| u.name == name) {
+        u.token = Some(token.to_string());
+    } else {
+        cfg.users.push(UserProfile {
+            name: name.to_string(),
+            token: Some(token.to_string()),
+            web_token: None,
+            web_refresh: None,
+            note: None,
+        });
+    }
+    cfg.active_user = Some(name.to_string());
+    cfg.token = None;
     write_config(path, &cfg)?;
     Ok(token.to_string())
 }
@@ -167,24 +235,34 @@ pub fn active_user() -> Result<Option<String>> {
     Ok(read_config(&config_path()?)?.active_user)
 }
 
-/// 按 1-based 序号切换激活用户；返回切换到的档案
-pub fn switch_user(num: usize) -> Result<UserProfile> {
-    switch_user_at(&config_path()?, num)
+/// 解析 switch / remove 的目标：纯数字 = 1-based 列表序号，否则 = 用户名。
+/// 返回 users 数组下标。
+fn resolve_target(cfg: &TomlConfig, target: &str) -> Option<usize> {
+    let target = target.trim();
+    if let Ok(n) = target.parse::<usize>() {
+        return cfg.by_index(n).map(|_| n - 1);
+    }
+    cfg.users.iter().position(|u| u.name == target)
 }
 
-fn switch_user_at(path: &Path, num: usize) -> Result<UserProfile> {
+/// 切换激活用户：目标可以是列表序号（1 起）或用户名；返回切换到的档案
+pub fn switch_user(target: &str) -> Result<UserProfile> {
+    switch_user_at(&config_path()?, target)
+}
+
+fn switch_user_at(path: &Path, target: &str) -> Result<UserProfile> {
     let mut cfg = read_config(path)?;
-    let target = cfg.by_index(num).cloned().ok_or_else(|| {
+    let idx = resolve_target(&cfg, target).ok_or_else(|| {
         anyhow!(
-            "序号 {} 不存在（共 {} 个用户，请输入 1-{}）。用 `gc auth user list` 查看",
-            num,
-            cfg.users.len(),
+            "用户 {} 不存在（共 {} 个用户）。用 `gc auth user list` 查看，序号或名字均可",
+            target,
             cfg.users.len()
         )
     })?;
-    cfg.active_user = Some(target.name.clone());
+    let profile = cfg.users[idx].clone();
+    cfg.active_user = Some(profile.name.clone());
     write_config(path, &cfg)?;
-    Ok(target)
+    Ok(profile)
 }
 
 /// 新增用户令牌（重名拒绝）；返回 (序号, 档案)。
@@ -218,7 +296,9 @@ fn add_user_at(
     }
     let profile = UserProfile {
         name: name.to_string(),
-        token: token.to_string(),
+        token: Some(token.to_string()),
+        web_token: None,
+        web_refresh: None,
         note: note.map(str::to_string),
     };
     cfg.users.push(profile.clone());
@@ -228,26 +308,45 @@ fn add_user_at(
     Ok((cfg.users.len(), profile))
 }
 
-/// 按 1-based 序号删除用户；返回被删用户名。删的是激活用户时激活态顺延到第一个
-pub fn remove_user(num: usize) -> Result<String> {
-    remove_user_at(&config_path()?, num)
+/// 更新指定用户的备注（用户不存在则报错）
+pub fn set_note(name: &str, note: &str) -> Result<()> {
+    set_note_at(&config_path()?, name, note)
 }
 
-fn remove_user_at(path: &Path, num: usize) -> Result<String> {
+fn set_note_at(path: &Path, name: &str, note: &str) -> Result<()> {
     let mut cfg = read_config(path)?;
-    let target = cfg.by_index(num).map(|u| u.name.clone()).ok_or_else(|| {
+    let u = cfg
+        .users
+        .iter_mut()
+        .find(|u| u.name == name.trim())
+        .ok_or_else(|| anyhow!("用户 {} 不存在", name))?;
+    u.note = Some(note.to_string());
+    write_config(path, &cfg)?;
+    Ok(())
+}
+
+/// 删除用户：目标可以是列表序号（1 起）或用户名；返回被删用户名。
+/// 删的是激活用户时激活态顺延到第一个
+pub fn remove_user(target: &str) -> Result<String> {
+    remove_user_at(&config_path()?, target)
+}
+
+fn remove_user_at(path: &Path, target: &str) -> Result<String> {
+    let mut cfg = read_config(path)?;
+    let idx = resolve_target(&cfg, target).ok_or_else(|| {
         anyhow!(
-            "序号 {} 不存在（共 {} 个用户）。用 `gc auth user list` 查看",
-            num,
+            "用户 {} 不存在（共 {} 个用户）。用 `gc auth user list` 查看，序号或名字均可",
+            target,
             cfg.users.len()
         )
     })?;
-    cfg.users.retain(|u| u.name != target);
-    if cfg.active_user.as_deref() == Some(target.as_str()) {
+    let name = cfg.users[idx].name.clone();
+    cfg.users.retain(|u| u.name != name);
+    if cfg.active_user.as_deref() == Some(name.as_str()) {
         cfg.active_user = cfg.users.first().map(|u| u.name.clone());
     }
     write_config(path, &cfg)?;
-    Ok(target)
+    Ok(name)
 }
 
 /// API 基址，可用环境变量 GITCODE_API_BASE 覆盖（默认官方 AtomGit v5 接口）
@@ -300,8 +399,10 @@ pub fn mask_token(token: &str) -> String {
     format!("{}…{}", head, tail)
 }
 
-/// 读取网页端 JWT（用于讨论等 v1 接口）的 access + refresh：
-/// 优先环境变量 GITCODE_WEB_TOKEN / GITCODE_WEB_REFRESH_TOKEN，回退到配置文件。
+/// 读取网页端 JWT（用于讨论等 v1 接口）的 access + refresh，优先级：
+/// 1) 环境变量 GITCODE_WEB_TOKEN / GITCODE_WEB_REFRESH_TOKEN
+/// 2) 当前激活用户的 web token 对（`gc auth switch` 一并切换）
+/// 3) 旧版单 web token 字段（未迁移配置的兜底）
 pub fn load_web_tokens() -> Result<(String, String)> {
     if let (Ok(a), Ok(r)) = (
         std::env::var("GITCODE_WEB_TOKEN"),
@@ -312,23 +413,77 @@ pub fn load_web_tokens() -> Result<(String, String)> {
         }
     }
     let cfg = read_config(&config_path()?)?;
+    if let Some(u) = cfg.active() {
+        if let (Some(a), Some(r)) = (u.web_token.as_deref(), u.web_refresh.as_deref()) {
+            if !a.trim().is_empty() && !r.trim().is_empty() {
+                return Ok((a.to_string(), r.to_string()));
+            }
+        }
+    }
     if let (Some(a), Some(r)) = (cfg.web_token, cfg.web_refresh) {
         if !a.trim().is_empty() && !r.trim().is_empty() {
             return Ok((a.trim().to_string(), r.trim().to_string()));
         }
     }
     Err(anyhow!(
-        "未找到网页端 token。请设置 GITCODE_WEB_TOKEN 与 GITCODE_WEB_REFRESH_TOKEN（可用 `gc webtoken set` 录入）"
+        "未找到网页端 token。请设置 GITCODE_WEB_TOKEN 与 GITCODE_WEB_REFRESH_TOKEN（可用 `gc web-token set` 录入）"
     ))
 }
 
-/// 保存网页端 access + refresh token 到 ~/.config/gitcode.toml（保留其它字段）
+/// 保存网页端 access + refresh token 到**当前激活用户**（没有任何用户时创建 default 档案）。
 pub fn save_web_tokens(access: &str, refresh: &str) -> Result<()> {
-    let path = config_path()?;
-    let mut cfg = read_config(&path)?;
-    cfg.web_token = Some(access.to_string());
-    cfg.web_refresh = Some(refresh.to_string());
-    write_config(&path, &cfg)?;
+    save_web_tokens_at(&config_path()?, access, refresh)
+}
+
+fn save_web_tokens_at(path: &Path, access: &str, refresh: &str) -> Result<()> {
+    let access = access.trim();
+    let refresh = refresh.trim();
+    if access.is_empty() || refresh.is_empty() {
+        anyhow::bail!("网页端 token 不能为空");
+    }
+    let mut cfg = read_config(path)?;
+    if cfg.users.is_empty() {
+        cfg.users.push(UserProfile {
+            name: DEFAULT_USER.to_string(),
+            token: None,
+            web_token: Some(access.to_string()),
+            web_refresh: Some(refresh.to_string()),
+            note: None,
+        });
+        cfg.active_user = Some(DEFAULT_USER.to_string());
+    } else if let Some(u) = cfg
+        .users
+        .iter_mut()
+        .find(|u| Some(&u.name) == cfg.active_user.as_ref())
+    {
+        u.web_token = Some(access.to_string());
+        u.web_refresh = Some(refresh.to_string());
+    } else {
+        cfg.users[0].web_token = Some(access.to_string());
+        cfg.users[0].web_refresh = Some(refresh.to_string());
+        cfg.active_user = Some(cfg.users[0].name.clone());
+    }
+    cfg.web_token = None; // 已迁入 users，清除旧字段
+    cfg.web_refresh = None;
+    write_config(path, &cfg)?;
+    Ok(())
+}
+
+/// 清除当前激活用户的网页端 token 对
+pub fn clear_web_tokens() -> Result<()> {
+    clear_web_tokens_at(&config_path()?)
+}
+
+fn clear_web_tokens_at(path: &Path) -> Result<()> {
+    let mut cfg = read_config(path)?;
+    let u = cfg
+        .users
+        .iter_mut()
+        .find(|u| Some(&u.name) == cfg.active_user.as_ref())
+        .ok_or_else(|| anyhow!("没有激活用户"))?;
+    u.web_token = None;
+    u.web_refresh = None;
+    write_config(path, &cfg)?;
     Ok(())
 }
 
@@ -351,6 +506,10 @@ pub fn prompt_and_save_web_tokens() -> Result<(String, String)> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// clone_url 测试会改 GITCODE_GIT_BASE，并行跑会互相踩——用锁串行化
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("gc-cfg-test-{}-{}.toml", tag, std::process::id()))
@@ -362,6 +521,7 @@ mod tests {
 
     #[test]
     fn test_clone_url_default() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GITCODE_GIT_BASE");
         assert_eq!(
             clone_url("alice", "demo"),
@@ -371,6 +531,7 @@ mod tests {
 
     #[test]
     fn test_clone_url_with_base() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GITCODE_GIT_BASE", "https://git.example.com/");
         assert_eq!(
             clone_url("bob", "repo"),
@@ -388,10 +549,13 @@ mod tests {
         let cfg = read_config(&path).unwrap();
         assert_eq!(cfg.users.len(), 1);
         assert_eq!(cfg.users[0].name, DEFAULT_USER);
-        assert_eq!(cfg.users[0].token, "legacy-pat");
+        assert_eq!(cfg.users[0].token.as_deref(), Some("legacy-pat"));
         assert_eq!(cfg.active_user.as_deref(), Some(DEFAULT_USER));
         // 激活档案即旧 token
-        assert_eq!(cfg.active().map(|u| u.token.as_str()), Some("legacy-pat"));
+        assert_eq!(
+            cfg.active().and_then(|u| u.token.as_deref()),
+            Some("legacy-pat")
+        );
         cleanup(&path);
     }
 
@@ -403,7 +567,7 @@ mod tests {
         assert_eq!(t, "new-pat");
         let cfg = read_config(&path).unwrap();
         assert_eq!(cfg.users.len(), 1);
-        assert_eq!(cfg.users[0].token, "new-pat");
+        assert_eq!(cfg.users[0].token.as_deref(), Some("new-pat"));
         assert!(cfg.token.is_none(), "迁移后旧字段应被清除");
         cleanup(&path);
     }
@@ -418,32 +582,57 @@ mod tests {
         save_token_at(&path, "second-pat-2").unwrap();
         let cfg = read_config(&path).unwrap();
         assert_eq!(cfg.active_user.as_deref(), Some("second"));
-        assert_eq!(cfg.active().unwrap().token, "second-pat-2");
+        assert_eq!(cfg.active().unwrap().token.as_deref(), Some("second-pat-2"));
         // 切回 first 后保存只改 first
-        switch_user_at(&path, 1).unwrap();
+        switch_user_at(&path, "1").unwrap();
         save_token_at(&path, "first-pat-2").unwrap();
         let cfg = read_config(&path).unwrap();
-        assert_eq!(cfg.active().unwrap().token, "first-pat-2");
-        assert_eq!(cfg.users[1].token, "second-pat-2");
+        assert_eq!(cfg.active().unwrap().token.as_deref(), Some("first-pat-2"));
+        assert_eq!(cfg.users[1].token.as_deref(), Some("second-pat-2"));
         cleanup(&path);
     }
 
     #[test]
-    fn test_switch_user_by_num() {
+    fn test_switch_user_by_num_or_name() {
         let path = tmp_path("switch");
         cleanup(&path);
         save_token_at(&path, "a").unwrap();
         add_user_at(&path, "b", "b-token", None).unwrap();
         add_user_at(&path, "c", "c-token", None).unwrap();
-        let u = switch_user_at(&path, 3).unwrap();
+        // 数字序号
+        let u = switch_user_at(&path, "3").unwrap();
         assert_eq!(u.name, "c");
         assert_eq!(
             read_config(&path).unwrap().active_user.as_deref(),
             Some("c")
         );
-        // 越界与 0 报错
-        assert!(switch_user_at(&path, 4).is_err());
-        assert!(switch_user_at(&path, 0).is_err());
+        // 名字
+        let u = switch_user_at(&path, "b").unwrap();
+        assert_eq!(u.name, "b");
+        // 越界 / 0 / 不存在的名字报错
+        assert!(switch_user_at(&path, "4").is_err());
+        assert!(switch_user_at(&path, "0").is_err());
+        assert!(switch_user_at(&path, "nope").is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_save_token_for_upsert_and_switch() {
+        let path = tmp_path("for");
+        cleanup(&path);
+        save_token_at(&path, "a").unwrap();
+        // 新名字：创建并切换
+        save_token_as_at(&path, "work", "work-tok").unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.users.len(), 2);
+        assert_eq!(cfg.active_user.as_deref(), Some("work"));
+        // 已存在：更新并切换（覆盖而非报错，与 user add 的重名拒绝互补）
+        save_token_as_at(&path, "default", "a2").unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.users.len(), 2);
+        assert_eq!(cfg.active_user.as_deref(), Some("default"));
+        assert_eq!(cfg.active().unwrap().token.as_deref(), Some("a2"));
+        assert_eq!(cfg.users[1].token.as_deref(), Some("work-tok"));
         cleanup(&path);
     }
 
@@ -465,12 +654,95 @@ mod tests {
         save_token_at(&path, "a").unwrap();
         add_user_at(&path, "b", "b-token", None).unwrap();
         // 当前激活 b（add 自动切换）；删 b 后激活回退到第一个
-        let removed = remove_user_at(&path, 2).unwrap();
+        let removed = remove_user_at(&path, "2").unwrap();
         assert_eq!(removed, "b");
         let cfg = read_config(&path).unwrap();
         assert_eq!(cfg.users.len(), 1);
         assert_eq!(cfg.active_user.as_deref(), Some(DEFAULT_USER));
-        assert!(remove_user_at(&path, 5).is_err());
+        assert!(remove_user_at(&path, "5").is_err());
+        assert!(remove_user_at(&path, "nope").is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_remove_user_by_name() {
+        let path = tmp_path("remove-name");
+        cleanup(&path);
+        save_token_at(&path, "a").unwrap();
+        add_user_at(&path, "work", "work-tok", None).unwrap();
+        // 按名字删除（不切走激活：删的是非激活用户）
+        switch_user_at(&path, "1").unwrap();
+        let removed = remove_user_at(&path, "work").unwrap();
+        assert_eq!(removed, "work");
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.users.len(), 1);
+        assert_eq!(cfg.active_user.as_deref(), Some(DEFAULT_USER));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_legacy_web_tokens_migrate_to_profile() {
+        let path = tmp_path("web-migrate");
+        cleanup(&path);
+        // 旧版格式：PAT + web token 对都是顶层字段
+        std::fs::write(
+            &path,
+            "token = \"pat-1\"\nweb_token = \"access-jwt\"\nweb_refresh = \"refresh-jwt\"\n",
+        )
+        .unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.users.len(), 1);
+        assert_eq!(cfg.users[0].web_token.as_deref(), Some("access-jwt"));
+        assert_eq!(cfg.users[0].web_refresh.as_deref(), Some("refresh-jwt"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_save_web_tokens_targets_active_user() {
+        let path = tmp_path("web-save");
+        cleanup(&path);
+        save_token_at(&path, "pat-a").unwrap();
+        add_user_at(&path, "work", "pat-b", None).unwrap();
+        // 当前激活 work
+        save_web_tokens_at(&path, "acc-work", "ref-work").unwrap();
+        // 切回 default 再存一对
+        switch_user_at(&path, "1").unwrap();
+        save_web_tokens_at(&path, "acc-def", "ref-def").unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.users[0].web_token.as_deref(), Some("acc-def"));
+        assert_eq!(cfg.users[1].web_token.as_deref(), Some("acc-work"));
+        // 激活的是 default，拿到的应是对应的那对
+        assert_eq!(cfg.active().unwrap().web_token.as_deref(), Some("acc-def"));
+        // 旧字段已被清除
+        assert!(cfg.web_token.is_none());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_clear_web_tokens_active_only() {
+        let path = tmp_path("web-clear");
+        cleanup(&path);
+        save_token_at(&path, "pat-a").unwrap();
+        save_web_tokens_at(&path, "acc", "ref").unwrap();
+        clear_web_tokens_at(&path).unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert!(cfg.users[0].web_token.is_none());
+        assert!(cfg.users[0].web_refresh.is_none());
+        assert_eq!(cfg.users[0].token.as_deref(), Some("pat-a"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_set_note() {
+        let path = tmp_path("note");
+        cleanup(&path);
+        save_token_at(&path, "a").unwrap();
+        add_user_at(&path, "work", "work-tok", None).unwrap();
+        set_note_at(&path, "work", "公司号").unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.users[1].note.as_deref(), Some("公司号"));
+        // 不存在的用户报错
+        assert!(set_note_at(&path, "nope", "x").is_err());
         cleanup(&path);
     }
 

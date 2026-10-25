@@ -210,9 +210,14 @@ fn strip_force_login(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 这些测试会改同一个环境变量，并行跑会互相踩——用锁串行化
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_broker_base_flag_priority() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 显式参数优先于环境变量
         std::env::set_var("GITCODE_BROKER", "https://env-broker.example");
         let base = broker_base_url(Some("https://flag-broker.example/")).unwrap();
@@ -222,6 +227,7 @@ mod tests {
 
     #[test]
     fn test_broker_base_from_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GITCODE_BROKER", "https://env-broker.example/");
         let base = broker_base_url(None).unwrap();
         assert_eq!(base, "https://env-broker.example");
@@ -230,6 +236,7 @@ mod tests {
 
     #[test]
     fn test_broker_base_missing_errors() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("GITCODE_BROKER");
         assert!(broker_base_url(None).is_err());
         assert!(broker_base_url(Some("  ")).is_err());

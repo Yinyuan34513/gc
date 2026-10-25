@@ -58,6 +58,7 @@ enum Command {
     #[command(name = "skill", alias = "extension", alias = "extsion")]
     Skill(gc_skill::SkillCmd),
     /// 管理网页端 JWT（access / refresh token）
+    #[command(name = "web-token", alias = "webtoken")]
     WebToken(WebTokenCmd),
     /// 裸 API 透传（直接调 v5 开放接口）
     Api(ApiArgs),
@@ -582,19 +583,16 @@ struct AuthCmd {
 #[derive(Subcommand)]
 enum AuthAction {
     /// 登录 GitCode（浏览器自动抓取登录态 / 粘贴 token，参考 gh auth login）
-    Login {
-        /// 强制走浏览器登录流程
+    Login(LoginArgs),
+    /// 添加新用户并登录（gh auth add 风格：token 存入新档案并切换过去）
+    Add {
+        /// 新用户名 / 备注名（如 work / 个人）
+        name: String,
+        /// 备注（账号用途，如「公司」「个人」）
         #[arg(long)]
-        web: bool,
-        /// 从 stdin 读取 token（脚本场景：gc auth login --with-token < mytoken.txt）
-        #[arg(long)]
-        with_token: bool,
-        /// OAuth broker 扫码登录（终端渲染二维码，需 --broker 或 GITCODE_BROKER）
-        #[arg(long, conflicts_with_all = ["web", "with_token"])]
-        qr: bool,
-        /// OAuth broker 地址（默认读环境变量 GITCODE_BROKER）
-        #[arg(long, value_name = "URL", requires = "qr")]
-        broker: Option<String>,
+        note: Option<String>,
+        #[clap(flatten)]
+        login: LoginArgs,
     },
     /// 直接输出 PAT（明文打印，可管道给其他工具：export GIT_TOKEN=$(gc auth pal)）
     Pal {
@@ -602,10 +600,10 @@ enum AuthAction {
         #[arg(long)]
         web: bool,
     },
-    /// 按编号切换激活用户（编号见 gc auth user list）
+    /// 切换激活用户（序号或名字，见 gc auth user list）
     Switch {
-        /// 用户序号（1 起）
-        num: usize,
+        /// 用户序号（1 起）或用户名
+        target: String,
     },
     /// 多用户令牌管理（list / add / remove；不带子命令同 list）
     User(AuthUserCmd),
@@ -631,6 +629,26 @@ struct TokenCmd {
     action: TokenAction,
 }
 
+/// `gc auth login` / `gc auth add` 共享的登录参数
+#[derive(clap::Args)]
+struct LoginArgs {
+    /// 强制走浏览器登录流程
+    #[arg(long)]
+    web: bool,
+    /// 从 stdin 读取 token（脚本场景：gc auth login --with-token < mytoken.txt）
+    #[arg(long)]
+    with_token: bool,
+    /// OAuth broker 扫码登录（终端渲染二维码，需 --broker 或 GITCODE_BROKER）
+    #[arg(long, conflicts_with_all = ["web", "with_token"])]
+    qr: bool,
+    /// OAuth broker 地址（默认读环境变量 GITCODE_BROKER）
+    #[arg(long, value_name = "URL", requires = "qr")]
+    broker: Option<String>,
+    /// 登录后保存到指定用户档案（不存在则创建）并切换为该用户
+    #[arg(long, value_name = "NAME")]
+    user: Option<String>,
+}
+
 #[derive(Parser)]
 struct AuthUserCmd {
     /// 子命令（省略同 list）
@@ -649,10 +667,10 @@ enum AuthUserAction {
         #[arg(long)]
         note: Option<String>,
     },
-    /// 按编号删除用户
+    /// 删除用户（序号或名字）
     Remove {
-        /// 用户序号（1 起）
-        num: usize,
+        /// 用户序号（1 起）或用户名
+        target: String,
     },
 }
 #[derive(Subcommand)]
@@ -773,8 +791,12 @@ struct WebTokenCmd {
 }
 #[derive(Subcommand)]
 enum WebTokenAction {
-    /// 交互式录入网页端 access / refresh token 并保存到配置
+    /// 交互式录入网页端 access / refresh token 并保存到当前激活用户
     Set,
+    /// 列出各用户的网页端 token 状态（脱敏）
+    List,
+    /// 清除当前激活用户的网页端 token 对
+    Clear,
 }
 
 #[derive(Parser)]
@@ -947,20 +969,47 @@ pub fn run() -> Result<()> {
                     eprintln!("未登录。运行 `gc auth login` 登录");
                     return Ok(());
                 }
-                let u = api.authenticated_user()?;
-                println!(
-                    "已认证: {} ({})",
-                    u["login"].as_str().unwrap_or("?"),
-                    u["name"].as_str().unwrap_or("?")
-                );
+                match api.authenticated_user() {
+                    Ok(u) => println!(
+                        "已认证: {} ({})",
+                        u["login"].as_str().unwrap_or("?"),
+                        u["name"].as_str().unwrap_or("?")
+                    ),
+                    Err(e) => {
+                        // 401 时指明是哪个用户的 token 出了问题，避免多账号下抓瞎
+                        if e.to_string().contains("401") {
+                            let who = config::active_user()?.unwrap_or_default();
+                            anyhow::bail!(
+                                "用户 {who} 的 token 无效或已过期（401）。\n\
+                                 处理：`gc auth user list` 查看全部用户；`gc auth switch <序号|名字>` 换人；\n\
+                                 `gc auth login` 重新登录。注意 v5 API 只接受 PAT，网页端 JWT 会被拒"
+                            );
+                        }
+                        return Err(e);
+                    }
+                }
             }
-            Some(AuthAction::Login {
-                web,
-                with_token,
-                qr,
-                broker,
-            }) => {
-                crate::auth::login(web, with_token, qr, broker.as_deref())?;
+            Some(AuthAction::Login(a)) => {
+                crate::auth::login(
+                    a.web,
+                    a.with_token,
+                    a.qr,
+                    a.broker.as_deref(),
+                    a.user.as_deref(),
+                )?;
+            }
+            Some(AuthAction::Add { name, note, login }) => {
+                crate::auth::login(
+                    login.web,
+                    login.with_token,
+                    login.qr,
+                    login.broker.as_deref(),
+                    Some(&name),
+                )?;
+                // 登录成功后再补备注（失败不留半成品档案）
+                if let Some(n) = &note {
+                    config::set_note(&name, n)?;
+                }
             }
             Some(AuthAction::Git { local }) => {
                 // 把 gc 注册为对应主机的 git credential helper：
@@ -1026,11 +1075,10 @@ pub fn run() -> Result<()> {
                 // 明文直接输出，方便 $(gc auth pal) 管道使用；不带任何前缀
                 println!("{}", token);
             }
-            Some(AuthAction::Switch { num }) => {
-                let u = config::switch_user(num)?;
+            Some(AuthAction::Switch { target }) => {
+                let u = config::switch_user(&target)?;
                 println!(
-                    "已切换到用户 #{} {}{}",
-                    num,
+                    "已切换到用户 {}{}",
                     u.name,
                     u.note.map(|n| format!("（{n}）")).unwrap_or_default()
                 );
@@ -1050,11 +1098,16 @@ pub fn run() -> Result<()> {
                         } else {
                             " "
                         };
+                        let pat = u
+                            .token
+                            .as_deref()
+                            .map(config::mask_token)
+                            .unwrap_or_else(|| "-".to_string());
                         println!(
                             "{:<4}{:<24}{:<26}{}",
                             format!("{}{}", mark, i + 1),
                             u.name,
-                            config::mask_token(&u.token),
+                            pat,
                             u.note.as_deref().unwrap_or("")
                         );
                     }
@@ -1074,9 +1127,9 @@ pub fn run() -> Result<()> {
                         u.note.map(|n| format!("（{n}）")).unwrap_or_default()
                     );
                 }
-                AuthUserAction::Remove { num } => {
-                    let name = config::remove_user(num)?;
-                    println!("已删除用户 #{} {}", num, name);
+                AuthUserAction::Remove { target } => {
+                    let name = config::remove_user(&target)?;
+                    println!("已删除用户 {}", name);
                 }
             },
         },
@@ -1984,6 +2037,42 @@ pub fn run() -> Result<()> {
             WebTokenAction::Set => {
                 config::prompt_and_save_web_tokens()?;
                 println!("已保存网页端 token 到 {}", config::config_path()?.display());
+            }
+            WebTokenAction::List => {
+                let users = config::list_users()?;
+                if users.is_empty() {
+                    println!("还没有配置任何用户。用 gc auth login 或 gc web-token set 录入");
+                    return Ok(());
+                }
+                let active = config::active_user()?;
+                println!(
+                    "{:<4}{:<24}{:<26}{}",
+                    "#", "用户", "网页端 access", "refresh"
+                );
+                for (i, u) in users.iter().enumerate() {
+                    let mark = if Some(&u.name) == active.as_ref() {
+                        "▶"
+                    } else {
+                        " "
+                    };
+                    let acc = u
+                        .web_token
+                        .as_deref()
+                        .map(config::mask_token)
+                        .unwrap_or_else(|| "-".to_string());
+                    let refr = if u.web_refresh.is_some() { "✓" } else { "-" };
+                    println!(
+                        "{:<4}{:<24}{:<26}{}",
+                        format!("{}{}", mark, i + 1),
+                        u.name,
+                        acc,
+                        refr
+                    );
+                }
+            }
+            WebTokenAction::Clear => {
+                config::clear_web_tokens()?;
+                println!("已清除当前用户的网页端 token");
             }
         },
         Command::Api(a) => {

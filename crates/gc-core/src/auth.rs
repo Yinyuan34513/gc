@@ -502,7 +502,7 @@ pub fn show_account(api: &crate::api::ApiClient, jwt: Option<&str>) {
 
 /// `gc auth login --qr`：OAuth broker 扫码登录。
 /// broker 返回的 access token 直接存为 PAT，随后走与手动登录一致的验证/展示。
-pub fn qr_login(broker: Option<&str>) -> Result<()> {
+pub fn qr_login(broker: Option<&str>, user: Option<&str>) -> Result<()> {
     let base = crate::qr_login::broker_base_url(broker)?;
     let session = crate::qr_login::start_login(&base)?;
     println!("请用已登录 GitCode 的手机 / 浏览器扫描下方二维码：");
@@ -521,8 +521,12 @@ pub fn qr_login(broker: Option<&str>) -> Result<()> {
         .user
         .clone()
         .unwrap_or_else(|| "GitCode 用户".to_string());
-    crate::config::save_token(&token.access_token)?;
-    println!("已扫码登录: {name}");
+    crate::config::save_token_for(user, &token.access_token)?;
+    if let Some(u) = user {
+        println!("已扫码登录: {name}（保存为用户 #{u} 并切换）");
+    } else {
+        println!("已扫码登录: {name}");
+    }
     if token.refresh_token.is_some() {
         println!("提示: broker 提供了 refresh token，但 gc 目前不自动刷新 PAT，过期后请重新扫码");
     }
@@ -531,17 +535,39 @@ pub fn qr_login(broker: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// 读一行文本输入（空输入报错）
+fn prompt_text(question: &str) -> Result<String> {
+    print!("{question}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line)? == 0 {
+        anyhow::bail!("未输入内容");
+    }
+    let t = line.trim().to_string();
+    if t.is_empty() {
+        anyhow::bail!("用户名为空");
+    }
+    Ok(t)
+}
+
 /// `gc auth login`：
 /// - `--qr`：OAuth broker 扫码登录；
 /// - `--with-token`：从 stdin 读 token（脚本场景，与 gh 一致）；
-/// - TTY：交互式选择「浏览器登录」或「粘贴 token」；
+/// - `user`：Some(名字) 时 token 存为该用户档案并切换（`gc auth add <名字>` 即此路径）；
+/// - TTY：交互式选择「浏览器登录」或「粘贴 token」；已有用户时先问「重新登录 / 添加新账号」；
 /// - 非 TTY 且无参数：报错，要求显式传参。
-pub fn login(web: bool, with_token: bool, qr: bool, broker: Option<&str>) -> Result<()> {
+pub fn login(
+    web: bool,
+    with_token: bool,
+    qr: bool,
+    broker: Option<&str>,
+    user: Option<&str>,
+) -> Result<()> {
     if qr && (web || with_token) {
         anyhow::bail!("--qr 与 --web / --with-token 只能使用其一");
     }
     if qr {
-        return qr_login(broker);
+        return qr_login(broker, user);
     }
     if with_token && web {
         anyhow::bail!("--web 与 --with-token 只能使用其一");
@@ -555,10 +581,30 @@ pub fn login(web: bool, with_token: bool, qr: bool, broker: Option<&str>) -> Res
         if token.is_empty() {
             anyhow::bail!("stdin 中未读到 token");
         }
-        return token_login(token);
+        return token_login(token, user);
     }
 
     let tty = std::io::stdin().is_terminal();
+    // gh 风格：已有用户且未指定目标时，先问「重新登录当前账号 / 添加新账号」
+    let user: Option<String> = match user {
+        Some(u) => Some(u.to_string()),
+        None if tty && !crate::config::list_users()?.is_empty() => {
+            let active = crate::config::active_user()?.unwrap_or_default();
+            let opt = prompt_choice(
+                &format!("已有用户（当前激活: {active}）。如何处理？"),
+                &["重新登录当前账号", "添加新账号"],
+                0,
+            )?;
+            if opt == 1 {
+                Some(prompt_text("新账号名字: ")?)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    let user = user.as_deref();
+
     let mode = if !tty {
         if web {
             0
@@ -573,25 +619,27 @@ pub fn login(web: bool, with_token: bool, qr: bool, broker: Option<&str>) -> Res
     if mode == 1 {
         let token = rpassword::prompt_password_stderr("请输入 GitCode 个人访问令牌: ")
             .map_err(|e| anyhow!("读取 token 失败: {e}"))?;
-        return token_login(token.trim());
+        return token_login(token.trim(), user);
     }
-    browser_login()
+    browser_login(user)
 }
 
 /// 粘贴 token 登录：保存 + 验证 + 展示账户信息。
-fn token_login(token: &str) -> Result<()> {
+/// `user` 为 Some 时存为该（新）档案并切换。
+fn token_login(token: &str, user: Option<&str>) -> Result<()> {
     let token = token.trim().to_string();
     if token.is_empty() {
         anyhow::bail!("token 为空，已取消");
     }
-    crate::config::save_token(&token)?;
+    crate::config::save_token_for(user, &token)?;
     let api = crate::api::ApiClient::new(crate::config::api_base(), Some(token))?;
     show_account(&api, None);
     Ok(())
 }
 
 /// 浏览器登录：选浏览器 → 自动抓 GitCode Cookie → 存配置 → 拉取账户信息。
-fn browser_login() -> Result<()> {
+/// `user` 为 Some 时 PAT 存为该（新）档案并切换。
+fn browser_login(user: Option<&str>) -> Result<()> {
     let mut browsers = detect_browsers();
     if browsers.is_empty() {
         println!("未检测到可用浏览器（chrome / chromium / edge / brave / firefox 等）。");
@@ -648,7 +696,7 @@ fn browser_login() -> Result<()> {
     let api = crate::api::ApiClient::new(crate::config::api_base(), Some(access.clone()))?;
     match api.authenticated_user() {
         Ok(_) => {
-            let _ = crate::config::save_token(&access);
+            let _ = crate::config::save_token_for(user, &access);
         }
         Err(_) => {
             eprintln!(

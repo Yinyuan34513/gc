@@ -84,8 +84,14 @@ gc auth              # 检查 PAT 是否有效
 gc auth pal          # 直接输出 PAT（可管道）
 gc auth git          # 注册 git 凭据助手，gitcode/atomgit 的 push/pull 免密
 gc auth user list    # 列出全部用户令牌（编号 + 激活标记）
-gc auth switch 2     # 按编号切换激活用户（多账号）
+gc auth switch 2     # 切换激活用户（序号或名字均可）
+gc auth add work     # 添加新用户并登录（gh auth add 风格，自动切换）
+gc auth login --user work --with-token   # 脚本场景：登录到指定用户
 gc auth user add x   # 新增一个用户令牌（隐藏输入，自动切换）
+gc auth user remove work                 # 删除用户（序号或名字）
+gc web-token set        # 录入网页端 JWT 到当前激活用户（别名 webtoken）
+gc web-token list       # 查看各用户的网页端 token 状态
+gc web-token clear      # 清除当前用户的网页端 token
 gc install --system  # 安装二进制到 /usr/local/bin（自动 sudo）
 ```
 
