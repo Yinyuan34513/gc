@@ -602,6 +602,13 @@ enum AuthAction {
         #[arg(long)]
         web: bool,
     },
+    /// 按编号切换激活用户（编号见 gc auth user list）
+    Switch {
+        /// 用户序号（1 起）
+        num: usize,
+    },
+    /// 多用户令牌管理（list / add / remove；不带子命令同 list）
+    User(AuthUserCmd),
     /// 把 gc 注册为 git 凭据助手（gitcode.com / atomgit.com）：
     /// 之后 git push/pull 走 HTTPS 时自动带上 PAT，不再需要配置账号密码
     Git {
@@ -622,6 +629,31 @@ enum AuthAction {
 struct TokenCmd {
     #[command(subcommand)]
     action: TokenAction,
+}
+
+#[derive(Parser)]
+struct AuthUserCmd {
+    /// 子命令（省略同 list）
+    #[command(subcommand)]
+    action: Option<AuthUserAction>,
+}
+#[derive(Subcommand)]
+enum AuthUserAction {
+    /// 列出已配置的用户令牌（编号 + 激活标记 + 脱敏 token）
+    List,
+    /// 新增用户令牌（隐藏输入 PAT；新增后自动切换为激活用户）
+    Add {
+        /// 用户名 / 备注名（同一账号可加多个身份）
+        name: String,
+        /// 备注（账号用途，如「公司」「个人」）
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// 按编号删除用户
+    Remove {
+        /// 用户序号（1 起）
+        num: usize,
+    },
 }
 #[derive(Subcommand)]
 enum TokenAction {
@@ -994,19 +1026,59 @@ pub fn run() -> Result<()> {
                 // 明文直接输出，方便 $(gc auth pal) 管道使用；不带任何前缀
                 println!("{}", token);
             }
-            None => {
-                // 无子命令时检查 token 有效性
-                let token = config::load_token()?.unwrap_or_default();
-                let api = ApiClient::new(
-                    config::api_base(),
-                    if token.is_empty() { None } else { Some(token) },
-                )?;
-                let me = api.authenticated_user()?;
+            Some(AuthAction::Switch { num }) => {
+                let u = config::switch_user(num)?;
                 println!(
-                    "token 有效，当前用户：{}",
-                    me["login"].as_str().unwrap_or("?")
+                    "已切换到用户 #{} {}{}",
+                    num,
+                    u.name,
+                    u.note.map(|n| format!("（{n}）")).unwrap_or_default()
                 );
             }
+            Some(AuthAction::User(c)) => match c.action.unwrap_or(AuthUserAction::List) {
+                AuthUserAction::List => {
+                    let users = config::list_users()?;
+                    if users.is_empty() {
+                        println!("还没有配置任何用户令牌。用 gc auth login 或 gc auth user add <名字> 添加");
+                        return Ok(());
+                    }
+                    let active = config::active_user()?;
+                    println!("{:<4}{:<24}{:<26}{}", "#", "用户", "token", "备注");
+                    for (i, u) in users.iter().enumerate() {
+                        let mark = if Some(&u.name) == active.as_ref() {
+                            "▶"
+                        } else {
+                            " "
+                        };
+                        println!(
+                            "{:<4}{:<24}{:<26}{}",
+                            format!("{}{}", mark, i + 1),
+                            u.name,
+                            config::mask_token(&u.token),
+                            u.note.as_deref().unwrap_or("")
+                        );
+                    }
+                    if let Some(a) = active {
+                        println!("当前激活: {a}");
+                    }
+                }
+                AuthUserAction::Add { name, note } => {
+                    let token =
+                        rpassword::prompt_password_stderr("请输入该用户的 GitCode 个人访问令牌: ")
+                            .map_err(|e| anyhow!("读取密码失败: {e}"))?;
+                    let (num, u) = config::add_user(&name, &token, note.as_deref())?;
+                    println!(
+                        "已添加并切换到用户 #{} {}{}",
+                        num,
+                        u.name,
+                        u.note.map(|n| format!("（{n}）")).unwrap_or_default()
+                    );
+                }
+                AuthUserAction::Remove { num } => {
+                    let name = config::remove_user(num)?;
+                    println!("已删除用户 #{} {}", num, name);
+                }
+            },
         },
 
         Command::Token(c) => match c.action {

@@ -83,6 +83,9 @@ description: 用 gc 命令行管理 GitCode/AtomGit 仓库、Issue、PR、Releas
 gc auth              # 检查 PAT 是否有效
 gc auth pal          # 直接输出 PAT（可管道）
 gc auth git          # 注册 git 凭据助手，gitcode/atomgit 的 push/pull 免密
+gc auth user list    # 列出全部用户令牌（编号 + 激活标记）
+gc auth switch 2     # 按编号切换激活用户（多账号）
+gc auth user add x   # 新增一个用户令牌（隐藏输入，自动切换）
 gc install --system  # 安装二进制到 /usr/local/bin（自动 sudo）
 ```
 
