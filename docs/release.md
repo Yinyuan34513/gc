@@ -1,16 +1,21 @@
 # 发布流程（crates.io）
 
-发布由 GitHub Actions 自动完成：**打 tag 即发布**。
+发布由 GitHub Actions 自动完成：**打 tag 即发布**。一键脚本 `scripts/release.sh`：
 
-仓库：[github.com/Yinyuan34513/gc](https://github.com/Yinyuan34513/gc)（镜像，CI 在这里跑）
-主仓：[atomgit.com/ghhhJoshrjnrhr/gc](https://atomgit.com/ghhhJoshrjnrhr/gc)（origin）
+```bash
+scripts/release.sh 0.1.5            # 正式发布
+scripts/release.sh 0.1.5 --dry-run  # 只跑前置检查，不改动任何东西
+```
 
-## 步骤
+脚本会依次做：前置 sanity 检查 → bump 版本（10 处）→ 构建校验 → 提交并推送
+双远端（推送后核对远端真实 SHA）→ 打 tag 并推送。任何检查不过即中止，
+且在中止点之前不做任何改动。
+
+手动逐步执行（等价于脚本行为）：
 
 ```bash
 # 1. 改版本号：根 Cargo.toml 的 [workspace.package] version +
 #    同文件「内部 crate」段里 9 个 gc-* 依赖的 version（共 10 处）
-#    例如 sed -i 's/0.1.3/0.1.4/g' Cargo.toml
 
 # 2. 提交并推到两个远端
 git push origin main   # atomgit
@@ -20,6 +25,9 @@ git push github main   # GitHub（CI 所在）
 git tag v0.1.4
 git push github v0.1.4
 ```
+
+仓库：[github.com/Yinyuan34513/gc](https://github.com/Yinyuan34513/gc)（镜像，CI 在这里跑）
+主仓：[atomgit.com/ghhhJoshrjnrhr/gc](https://atomgit.com/ghhhJoshrjnrhr/gc)（origin）
 
 推送 tag 后，`Publish to crates.io` workflow 自动执行：
 
