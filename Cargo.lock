@@ -812,6 +812,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "signal-hook",
  "termimad",
  "toml",
  "tungstenite",

@@ -13,3 +13,4 @@ pub mod config;
 pub mod ctx;
 pub mod output;
 pub mod qr_login;
+pub mod siginfo;

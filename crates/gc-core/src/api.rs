@@ -1114,6 +1114,16 @@ impl ApiClient {
                 .progress_chars("#>-"),
         );
         bar.set_message("上传中");
+        crate::siginfo::set_status(&format!("上传 {file_name}"));
+        crate::siginfo::track(bar.clone());
+        // 作用域结束（含 `?` 提前返回）时把 SIGINFO 状态和进度条登记清掉
+        struct ClearSiginfo;
+        impl Drop for ClearSiginfo {
+            fn drop(&mut self) {
+                crate::siginfo::clear_status();
+            }
+        }
+        let _clear = ClearSiginfo;
         let reader = ProgressReader {
             inner: std::fs::File::open(file).map_err(|e| anyhow!("打开文件失败: {}", e))?,
             bar: bar.clone(),

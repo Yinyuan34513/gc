@@ -947,6 +947,7 @@ enum WikiAction {
 }
 
 pub fn run() -> Result<()> {
+    gc_core::siginfo::install(); // macOS/*BSD Ctrl-T 状态报告；其它平台为 no-op
     let cli = Cli::parse();
 
     // MCP 是长时服务：凭据缺失时也要能启动（缺什么由具体工具在调用时报错，
