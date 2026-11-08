@@ -15,4 +15,5 @@ pub mod ctx;
 pub mod db;
 pub mod output;
 pub mod qr_login;
+pub mod secret;
 pub mod siginfo;

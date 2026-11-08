@@ -24,7 +24,7 @@ pub struct UserProfile {
 }
 
 /// 解析 ~/.config/gitcode.toml（可选）
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct TomlConfig {
     /// 旧版单 token 字段：users 为空时迁入 default 用户；迁移后不再写入
     #[serde(default)]
@@ -122,6 +122,19 @@ fn read_config(path: &Path) -> Result<TomlConfig> {
     let mut cfg: TomlConfig =
         toml::from_str(&text).map_err(|e| anyhow!("解析 gitcode.toml 失败: {}", e))?;
     cfg.migrate();
+    // token 字段统一 AES-256-GCM 解密（无 gcm1: 前缀的明文原样透传，
+    // 兼容旧配置——下次落盘时由 write_config 自动加密）
+    let dec = |v: &Option<String>| -> Result<Option<String>> {
+        v.as_ref().map(|s| crate::secret::unprotect(s)).transpose()
+    };
+    for u in &mut cfg.users {
+        u.token = dec(&u.token)?;
+        u.web_token = dec(&u.web_token)?;
+        u.web_refresh = dec(&u.web_refresh)?;
+    }
+    cfg.token = dec(&cfg.token)?;
+    cfg.web_token = dec(&cfg.web_token)?;
+    cfg.web_refresh = dec(&cfg.web_refresh)?;
     Ok(cfg)
 }
 
@@ -130,7 +143,21 @@ fn write_config(path: &Path, cfg: &TomlConfig) -> Result<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("创建目录 {} 失败: {}", parent.display(), e))?;
     }
-    let body = toml::to_string(cfg).map_err(|e| anyhow!("序列化配置失败: {}", e))?;
+    // token 字段统一 AES-256-GCM 加密后落盘（已是密文则原样保留）
+    let enc = |v: &Option<String>| -> Result<Option<String>> {
+        v.as_ref().map(|s| crate::secret::protect(s)).transpose()
+    };
+    let mut out = cfg.clone();
+    for u in &mut out.users {
+        u.token = enc(&u.token)?;
+        u.web_token = enc(&u.web_token)?;
+        u.web_refresh = enc(&u.web_refresh)?;
+    }
+    out.token = enc(&out.token)?;
+    out.web_token = enc(&out.web_token)?;
+    out.web_refresh = enc(&out.web_refresh)?;
+
+    let body = toml::to_string(&out).map_err(|e| anyhow!("序列化配置失败: {}", e))?;
     std::fs::write(path, body).map_err(|e| anyhow!("写入 {} 失败: {}", path.display(), e))?;
     Ok(())
 }
