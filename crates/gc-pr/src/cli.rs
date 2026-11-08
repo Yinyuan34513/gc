@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! PR 域：参数定义（PrCmd/PrAction 及评论/评审人/标签/关联子命令）与 `Command::Pr` 分发。
 
 use anyhow::{anyhow, Context as _};

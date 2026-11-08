@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc auth login --qr` —— OAuth broker 扫码登录。
 //!
 //! 流程（契约逆向自 lming112/gitcode-cli 的 docs/openspec.md）：

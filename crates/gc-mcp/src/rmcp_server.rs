@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! 基于 [`rmcp`] SDK 的 MCP 服务端桥接。
 //!
 //! 与 [`crate::mcp`]（自研 stdio JSON-RPC 实现）共享同一份工具注册表

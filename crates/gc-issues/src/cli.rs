@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Issue 域：参数定义（IssueCmd/IssueAction）与 `Command::Issue` 分发。
 
 use anyhow::{anyhow, Context as _};

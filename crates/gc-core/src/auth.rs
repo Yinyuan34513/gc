@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc auth login` —— GitCode 登录。
 //!
 //! 交互流程参考 gh (cli/cli) 的 `auth login`：先选认证方式（浏览器 / 粘贴 token），

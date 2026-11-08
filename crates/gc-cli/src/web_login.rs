@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc auth weblogin` —— 外置 Python 登录脚本的 PTY 拉起器。
 //!
 //! 流程（对应 scripts/gc_web_login.py 的输出协议）：

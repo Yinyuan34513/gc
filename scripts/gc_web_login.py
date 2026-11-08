@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """gc_web_login.py — gc 的外置浏览器登录脚本（Playwright）。
 
 被 gc 通过 PTY 拉起。流程：

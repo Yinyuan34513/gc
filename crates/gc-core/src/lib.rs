@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc-core` —— gc 的公共层。
 //!
 //! 承载三大基础设施，供所有域 crate（gc-repo / gc-pr / gc-issues / gc-grep /

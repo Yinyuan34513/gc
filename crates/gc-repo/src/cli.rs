@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! 仓库域：参数定义（RepoCmd/RepoAction 等）与 `Command::Repo` 分发。
 
 use anyhow::{anyhow, Context as _};

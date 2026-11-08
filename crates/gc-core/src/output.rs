@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CLI 共享输出层：pretty/list 打印、--json/--jq 结构化输出、termimad 渲染、编辑器助手。
 
 use anyhow::{anyhow, Context as _};

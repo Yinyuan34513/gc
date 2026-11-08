@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! 仓库上下文与网页端 token 的共享助手。
 //!
 //! 从 gc-cli 提升而来，供 CLI 与 MCP 工具层共用：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::path::Path;

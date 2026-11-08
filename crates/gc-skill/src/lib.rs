@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc-skill` —— AI 工具技能域：检测并安装 gc 技能（顶层别名 extension / extsion）。
 
 use anyhow::{anyhow, Context as _, Result};

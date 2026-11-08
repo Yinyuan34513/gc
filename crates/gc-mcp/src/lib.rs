@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc-mcp` —— gc 的 MCP 服务端 crate。
 //!
 //! 承载原 `src/mcp` 模块（stdio 上的换行分隔 JSON-RPC 2.0、工具注册表、

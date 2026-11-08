@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc-cli` —— gc 的命令行层。
 //!
 //! 承载全部 clap 参数定义、子命令分发与人类可读输出（列表打印、

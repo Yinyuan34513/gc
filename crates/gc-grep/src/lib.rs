@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc-grep` —— 仓库内容搜索域。
 //!
 //! 当前阶段：把 [`gc_core::api`] 中供 grep 使用的文件树 / 下载 API

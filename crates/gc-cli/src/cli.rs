@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use clap::{Parser, Subcommand};

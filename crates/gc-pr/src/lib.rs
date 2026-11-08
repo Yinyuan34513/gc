@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `gc-pr` —— PR 域。
 //!
 //! 当前阶段：把 [`gc_core::api`] 中的 PR 网页端 API 以本 crate 命名空间

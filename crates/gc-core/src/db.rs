@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! gc 的 SQLite 存储层：统一放在 gc 配置目录下的 `gc.db`。
 //!
 //! 三张表：

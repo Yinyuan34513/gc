@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! SIGINFO 支持 —— 在 macOS / *BSD（FreeBSD、OpenBSD、NetBSD、DragonFly）上
 //! 按 Ctrl-T（SIGINFO）打印当前操作状态。
 //!
