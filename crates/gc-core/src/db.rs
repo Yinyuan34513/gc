@@ -72,6 +72,20 @@ pub fn kv_get(key: &str) -> Result<Option<String>> {
     Ok(rows.next()?.and_then(|r| r.get::<_, String>(0).ok()))
 }
 
+/// 按前缀列举 kv（返回 (去掉前缀的后缀, value)，按后缀排序）。
+pub fn kv_list(prefix: &str) -> Result<Vec<(String, String)>> {
+    let conn = open()?;
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM kv WHERE key LIKE ?1 || '%' ORDER BY key",
+    )?;
+    let rows = stmt.query_map([prefix], |r| {
+        let k: String = r.get(0)?;
+        let v: String = r.get(1)?;
+        Ok((k.strip_prefix(prefix).unwrap_or(&k).to_string(), v))
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 // ---- 搜索缓存 ------------------------------------------------------------------
 
 fn cache_key(query: &str, kind: &str, per_page: u32, max_pages: Option<u32>) -> String {

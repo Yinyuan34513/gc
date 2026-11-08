@@ -51,6 +51,10 @@ enum Command {
     Refresh,
     /// 外置 Playwright 脚本登录：gc 开 PTY 运行 Python，抓取稳定 Cookie 入 SQLite
     WebLogin,
+    /// GPG 密钥管理（用法和 gh 一样：list / add / delete）
+    GpgKey(GpgKeyCmd),
+    /// 查看 / 修改个人设置（个人中心 uc 接口）
+    Setting(SettingCmd),
     /// 安装 gc 二进制到 PATH（默认 ~/.local/bin；--system 装到 /usr/local/bin，需要时自动 sudo）
     Install {
         /// 安装到系统目录 /usr/local/bin（非 root 时自动用 sudo）
@@ -680,6 +684,55 @@ enum AuthUserAction {
 enum TokenAction {
     /// 交互式输入并把 token 保存到 ~/.config/gitcode.toml
     Set,
+    /// 生成新的经典 token（个人中心 uc 接口），返回后自动保存并设为当前激活
+    Gen {
+        /// token 名称（--name）
+        #[arg(long)]
+        name: String,
+        /// 过期日期 YYYY-MM-DD（默认 2099-12-31，即近似永久）
+        #[arg(long)]
+        expires: Option<String>,
+        /// scope（可重复；默认全量 scope 集合）
+        #[arg(long = "scope", num_args = 0..)]
+        scope: Vec<String>,
+    },
+    /// 切换当前用户激活的 token（列出本地已保存的多个密钥）
+    Switch {
+        /// 目标 token 名称（省略则列出全部与当前激活项）
+        name: Option<String>,
+    },
+}
+
+#[derive(Parser)]
+struct GpgKeyCmd {
+    #[command(subcommand)]
+    action: GpgKeyAction,
+}
+#[derive(Subcommand)]
+enum GpgKeyAction {
+    /// 列出 GPG 密钥
+    List,
+    /// 导入 GPG 公钥（文件路径省略时从 stdin 读）
+    Add {
+        /// 包含公钥的文件（armor 文本）；省略则读 stdin
+        key_file: Option<String>,
+    },
+    /// 删除 GPG 密钥（按 id）
+    Delete { id: String },
+}
+
+#[derive(Parser)]
+struct SettingCmd {
+    #[command(subcommand)]
+    action: SettingAction,
+}
+#[derive(Subcommand)]
+enum SettingAction {
+    /// 查看当前个人设置
+    Show,
+    /// 修改一个设置项并保存
+    /// 可用键：website / company / location / github_account / description
+    Set { key: String, value: String },
 }
 
 #[derive(Parser)]
@@ -1174,6 +1227,76 @@ pub fn run() -> Result<()> {
         },
 
         Command::Token(c) => match c.action {
+            TokenAction::Gen { name, expires, scope } => {
+                // uc 接口走浏览器会话 JWT；当前用户名从 PAT 侧取
+                let jwt = web_access_token()?;
+                let api = ApiClient::new(config::api_base(), config::load_token()?)?;
+                let me = api.authenticated_user()?;
+                let username = me["login"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("取不到当前用户名"))?
+                    .to_string();
+                let expires = expires.unwrap_or_else(|| "2099-12-31".to_string());
+                let scopes: Vec<String> = if scope.is_empty() {
+                    crate::api::TOKEN_SCOPES_ALL.iter().map(|s| s.to_string()).collect()
+                } else {
+                    scope
+                };
+                let resp = crate::api::uc_token_create(&jwt, &username, &name, &expires, &scopes)?;
+                let token_value = resp["token"]
+                    .as_str()
+                    .or_else(|| resp["data"]["token"].as_str())
+                    .ok_or_else(|| anyhow!("响应里没有 token 字段: {}", pretty(&resp)))?;
+                println!("已生成 token: {}（{}，过期 {}）", name, username, expires);
+                println!("密钥: {}", token_value);
+                // 自动保存：激活进配置 + 按「新 token 实测 owner/名字」存 SQLite
+                // （impersonation token 归属 JWT 账号，可能与 PAT 账号不同，
+                //   switch 同样用激活 token 的 /user login 推导，两边保持一致）
+                config::save_token(token_value)?;
+                let owner = ApiClient::new(config::api_base(), Some(token_value.to_string()))?
+                    .authenticated_user()
+                    .ok()
+                    .and_then(|u| u["login"].as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| username.clone());
+                gc_core::db::kv_set(&format!("token:{owner}:{name}"), token_value)?;
+                println!("已自动保存密钥（当前激活，可用 gc token switch 切换）");
+            }
+            TokenAction::Switch { name } => {
+                let api = ApiClient::new(config::api_base(), config::load_token()?)?;
+                let me = api.authenticated_user()?;
+                let username = me["login"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("取不到当前用户名"))?
+                    .to_string();
+                let prefix = format!("token:{username}:");
+                let entries = gc_core::db::kv_list(&prefix)?;
+                if entries.is_empty() {
+                    println!("本地没有已保存的 token（先 gc token gen --name <名字> 生成）");
+                    return Ok(());
+                }
+                let active = config::load_token()?.unwrap_or_default();
+                match name {
+                    Some(n) => {
+                        let value = entries
+                            .iter()
+                            .find(|(k, _)| *k == n)
+                            .map(|(_, v)| v.clone())
+                            .ok_or_else(|| {
+                                anyhow!("本地没有名为 {n} 的 token：可选 {}",
+                                    entries.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", "))
+                            })?;
+                        config::save_token(&value)?;
+                        println!("已切换激活 token: {n}");
+                    }
+                    None => {
+                        println!("当前用户 {username} 的本地 token：");
+                        for (k, v) in &entries {
+                            let mark = if *v == active { " ← 当前激活" } else { "" };
+                            println!("  {k}{mark}");
+                        }
+                    }
+                }
+            }
             TokenAction::Set => {
                 let token = config::prompt_and_save_token()?;
                 println!("token 已保存到 {}", config::config_path()?.display());
@@ -2059,6 +2182,68 @@ pub fn run() -> Result<()> {
 
         Command::WebLogin => {
             crate::web_login::run_web_login(true)?;
+        }
+
+        Command::GpgKey(c) => {
+            let jwt = web_access_token()?;
+            match c.action {
+                GpgKeyAction::List => {
+                    let v = crate::api::uc_gpg_keys(&jwt)?;
+                    let items = v["data"].as_array().or_else(|| v.as_array()).cloned().unwrap_or_default();
+                    if items.is_empty() {
+                        println!("(没有 GPG 密钥)");
+                    }
+                    for it in &items {
+                        println!(
+                            "{}  {}  {}",
+                            it["id"].as_u64().map(|i| i.to_string()).unwrap_or_else(|| "?".into()),
+                            it["name"].as_str().or_else(|| it["title"].as_str()).unwrap_or("?"),
+                            it["key_id"].as_str().or_else(|| it["fingerprint"].as_str()).unwrap_or(""),
+                        );
+                    }
+                }
+                GpgKeyAction::Add { key_file } => {
+                    let text = match key_file {
+                        Some(f) => std::fs::read_to_string(&f)
+                            .map_err(|e| anyhow!("读取 {} 失败: {}", f, e))?,
+                        None => std::io::read_to_string(std::io::stdin())
+                            .map_err(|e| anyhow!("读取 stdin 失败: {}", e))?,
+                    };
+                    let v = crate::api::uc_gpg_key_add(&jwt, &text)?;
+                    println!("已添加 GPG 密钥: {}", pretty(&v));
+                }
+                GpgKeyAction::Delete { id } => {
+                    crate::api::uc_gpg_key_delete(&jwt, &id)?;
+                    println!("已删除 GPG 密钥: {id}");
+                }
+            }
+        }
+
+        Command::Setting(c) => {
+            let jwt = web_access_token()?;
+            let api = ApiClient::new(config::api_base(), config::load_token()?)?;
+            let me = api.authenticated_user()?;
+            let username = me["login"]
+                .as_str()
+                .ok_or_else(|| anyhow!("取不到当前用户名"))?
+                .to_string();
+            match c.action {
+                SettingAction::Show => {
+                    let v = crate::api::uc_setting_get(&jwt, &username)?;
+                    println!("{}", pretty(&v));
+                }
+                SettingAction::Set { key, value } => {
+                    let v = crate::api::uc_setting_get(&jwt, &username)?;
+                    let mut profile = v["profile"].clone();
+                    if !profile.is_object() {
+                        anyhow::bail!("个人设置响应里没有 profile 对象，无法修改");
+                    }
+                    // 允许的键与抓包一致；未知键也允许尝试（服务端会校验）
+                    profile[key.as_str()] = json!(value.clone());
+                    crate::api::uc_setting_save(&jwt, &username, &profile)?;
+                    println!("已保存个人设置: {key} = {value}");
+                }
+            }
         }
 
         Command::Refresh => {

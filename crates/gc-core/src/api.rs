@@ -3955,3 +3955,206 @@ fn cookie_value(set_cookie: &str, name: &str) -> Option<String> {
     }
     None
 }
+
+// ============================================================================
+// uc 域（个人中心）：token 管理 / GPG 密钥 / 个人设置
+// ============================================================================
+// 端点逆向自 2026-11-08 抓包（output.txt）：
+// - POST /uc/api/v1/user/{username}/impersonation_tokens  创建经典 token
+// - GET  /uc/api/v1/user/{username}/impersonation_tokens  列出已有 token
+// - GET  /uc/api/v1/user/gpg_keys?page=&per_page=&search= 列出 GPG 密钥
+// - GET  /uc/api/v1/user/setting/profile?username=        个人设置
+// 均需浏览器会话 JWT（Bearer）+ 浏览器头。
+
+/// uc 域请求公共头（Bearer JWT + 浏览器伪装头）。
+pub fn uc_request(
+    token: &str,
+    method: reqwest::Method,
+    path: &str,
+    query: &[(&str, &str)],
+    json_body: Option<&Value>,
+) -> Result<Value> {
+    let client = web_client()?;
+    let url = if query.is_empty() {
+        format!("{}{}", web_base().trim_end_matches('/'), path)
+    } else {
+        format!(
+            "{}{}?{}",
+            web_base().trim_end_matches('/'),
+            path,
+            query.iter().map(|(k, v)| format!("{k}={}", enc(v))).collect::<Vec<_>>().join("&")
+        )
+    };
+    let page_ref = "https://gitcode.com/setting";
+    let mut req = client
+        .request(method, &url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", page_ref)
+        .header("page-uri", page_ref);
+    if let Some(body) = json_body {
+        req = req.json(body);
+    }
+    let resp = req.send().context("请求 GitCode uc 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode uc 接口错误 {}: {}", status, text));
+    }
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&text).context("解析 uc 接口响应失败")
+}
+
+/// uc 域 form 编码请求（GPG 密钥添加等网页表单型接口）。
+fn uc_request_form(
+    token: &str,
+    method: reqwest::Method,
+    path: &str,
+    form: &[(&str, &str)],
+) -> Result<Value> {
+    let client = web_client()?;
+    let url = format!("{}{}", web_base().trim_end_matches('/'), path);
+    let page_ref = "https://gitcode.com/setting";
+    let resp = client
+        .request(method, &url)
+        .bearer_auth(token)
+        .header("Origin", "https://gitcode.com")
+        .header("Referer", "https://gitcode.com/")
+        .header("X-Platform", "web")
+        .header("page-ref", page_ref)
+        .header("page-uri", page_ref)
+        .form(form)
+        .send()
+        .context("请求 GitCode uc 接口失败")?;
+    let status = resp.status();
+    let text = resp.text().context("读取响应体失败")?;
+    if !status.is_success() {
+        return Err(anyhow!("GitCode uc 接口错误 {}: {}", status, text));
+    }
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&text).context("解析 uc 接口响应失败")
+}
+
+/// 个人中心经典 token 的默认 scope 集合（抓包原样）。
+pub const TOKEN_SCOPES_ALL: [&str; 14] = [
+    "all_user", "all_key", "all_groups", "all_group_kanban", "all_group_discussion",
+    "all_projects", "all_pr", "all_issue", "all_note", "all_hook", "all_repository",
+    "all_action", "all_project_discussion", "all_enterprises",
+];
+
+/// 列出某用户的经典 token（uc 域）。
+pub fn uc_token_list(token: &str, username: &str) -> Result<Value> {
+    uc_request(
+        token,
+        reqwest::Method::GET,
+        &format!("/uc/api/v1/user/{username}/impersonation_tokens"),
+        &[("page", "1"), ("per_page", "50")],
+        None,
+    )
+}
+
+/// 创建经典 token（uc 域）。响应里含 token 明文（仅创建时返回一次）。
+pub fn uc_token_create(
+    token: &str,
+    username: &str,
+    name: &str,
+    expires_at: &str,
+    scopes: &[String],
+) -> Result<Value> {
+    let body = json!({
+        "username": username,
+        "name": name,
+        "expires_at": expires_at,
+        "scopes": scopes,
+        "description": "",
+    });
+    uc_request(
+        token,
+        reqwest::Method::POST,
+        &format!("/uc/api/v1/user/{username}/impersonation_tokens"),
+        &[],
+        Some(&body),
+    )
+}
+
+/// 列出 GPG 密钥（uc 域）。
+pub fn uc_gpg_keys(token: &str) -> Result<Value> {
+    uc_request(
+        token,
+        reqwest::Method::GET,
+        "/uc/api/v1/user/gpg_keys",
+        &[("page", "1"), ("per_page", "20"), ("search", "")],
+        None,
+    )
+}
+
+/// 添加 GPG 密钥（uc 域）：form 编码 key+title（实测 JSON 会被参数校验拒绝）。
+/// title 取公钥里的注释/邮箱，取不到就用 "gpg-key"。
+pub fn uc_gpg_key_add(token: &str, key_text: &str) -> Result<Value> {
+    let key = key_text.trim();
+    let title = key
+        .lines()
+        .filter(|l| l.starts_with('#') || !l.starts_with('-'))
+        .find(|l| l.contains('@') || l.contains('('))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| "gpg-key".to_string());
+    uc_request_form(
+        token,
+        reqwest::Method::POST,
+        "/uc/api/v1/user/gpg_keys",
+        &[("key", key), ("title", &title)],
+    )
+}
+
+/// 删除 GPG 密钥（uc 域）。
+pub fn uc_gpg_key_delete(token: &str, id: &str) -> Result<Value> {
+    uc_request(
+        token,
+        reqwest::Method::DELETE,
+        &format!("/uc/api/v1/user/gpg_keys/{id}"),
+        &[],
+        None,
+    )
+}
+
+/// 读取个人设置（uc 域）。
+pub fn uc_setting_get(token: &str, username: &str) -> Result<Value> {
+    uc_request(
+        token,
+        reqwest::Method::GET,
+        "/uc/api/v1/user/setting/profile",
+        &[("username", username)],
+        None,
+    )
+}
+
+/// 保存个人设置（uc 域）：先 GET 拿最新 profile_token，再 POST setting/save。
+/// 请求体形态抓包原样：{profile_token, avatar, nickname, profile{...}}。
+pub fn uc_setting_save(token: &str, username: &str, profile: &Value) -> Result<Value> {
+    let cur = uc_setting_get_public(token, username)?;
+    let profile_token = cur["profile_token"].as_str().unwrap_or("").to_string();
+    let body = json!({
+        "profile_token": profile_token,
+        "avatar": cur["avatar"],
+        "nickname": cur["nickname"],
+        "profile": profile,
+    });
+    uc_request(token, reqwest::Method::POST, "/uc/api/v1/user/setting/save", &[], Some(&body))
+}
+
+/// uc_setting_get 的内部公开形态（save 需要同响应里的 profile_token/avatar/nickname）。
+fn uc_setting_get_public(token: &str, username: &str) -> Result<Value> {
+    uc_request(
+        token,
+        reqwest::Method::GET,
+        "/uc/api/v1/user/setting/profile",
+        &[("username", username)],
+        None,
+    )
+}
