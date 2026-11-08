@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::config;
 use gc_core::ctx::{parse_gitcode_repo, split_repo, web_access_token};
-use gc_core::output::{edit_title_body, pretty, print_list, read_as_base64};
+use gc_core::output::{self, edit_title_body, pretty, print_list, read_as_base64};
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +48,8 @@ enum Command {
     Discussion(DiscussionCmd),
     /// 刷新网页端 JWT（用于讨论等 v1 接口）
     Refresh,
+    /// 外置 Playwright 脚本登录：gc 开 PTY 运行 Python，抓取稳定 Cookie 入 SQLite
+    WebLogin,
     /// 安装 gc 二进制到 PATH（默认 ~/.local/bin；--system 装到 /usr/local/bin，需要时自动 sudo）
     Install {
         /// 安装到系统目录 /usr/local/bin（非 root 时自动用 sudo）
@@ -717,23 +719,48 @@ struct SearchCmd {
 }
 #[derive(Subcommand)]
 enum SearchAction {
-    /// 搜索仓库
-    Repos { query: String },
-    /// 搜索用户
-    Users { query: String },
-    /// 搜索 Issue
-    Issues { query: String },
-    /// 全站搜索（网页端接口，无需任何凭据）
+    /// 搜索仓库（默认翻完全部页并去重聚合）
+    Repos {
+        query: String,
+        /// 原生过滤：排除 AtomGit/GitCode 官方 GitHub 镜像组织
+        #[arg(long)]
+        native: bool,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
+    /// 搜索用户（默认翻完全部页并去重聚合）
+    Users {
+        query: String,
+        /// 原生过滤：排除官方 GitHub 镜像组织的条目
+        #[arg(long)]
+        native: bool,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
+    /// 搜索 Issue（默认翻完全部页并去重聚合）
+    Issues {
+        query: String,
+        /// 原生过滤：排除官方 GitHub 镜像组织的条目
+        #[arg(long)]
+        native: bool,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
+    /// 全站搜索（网页端接口，无需任何凭据）。默认翻完全部页并去重聚合
     Web {
         query: String,
         /// 搜索类型：repo / user / issue
         #[arg(long, default_value = "repo")]
         r#type: String,
-        #[arg(long, default_value_t = 1)]
-        page: u32,
         /// 每页条数，服务端上限 20
         #[arg(long, default_value_t = 20)]
         per_page: u32,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
         /// 输出原始 JSON 而非表格
         #[arg(long)]
         json: bool,
@@ -808,6 +835,16 @@ struct UserCmd {
 enum UserAction {
     /// 查看用户资料（网页端 v1 接口）
     View { username: String },
+    /// 搜索用户（等价 gc search users；默认翻完全部页并去重聚合）
+    Search {
+        query: String,
+        /// 原生过滤：排除官方 GitHub 镜像组织的条目
+        #[arg(long)]
+        native: bool,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
     /// 获取 / 下载用户头像（网页端 v1 接口）
     Avatar {
         username: String,
@@ -1928,50 +1965,63 @@ pub fn run() -> Result<()> {
         },
 
         Command::Search(c) => match c.action {
-            SearchAction::Repos { query } => {
-                let v = api.search_repos(&query)?;
-                print_list(&v, |it| {
-                    let full = it["full_name"].as_str().unwrap_or("?");
-                    let desc = it["description"].as_str().unwrap_or("");
-                    if desc.is_empty() {
-                        full.to_string()
-                    } else {
-                        format!("{} — {}", full, desc)
-                    }
-                });
+            SearchAction::Repos { query, native, max_pages } => {
+                let (mut v, pages, dups) =
+                    api.search_v5_all("/search/repositories", &query, 20, max_pages)?;
+                if native {
+                    output::filter_native_mirrors(&mut v);
+                }
+                eprintln!("[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果", v.as_array().map(|a| a.len()).unwrap_or(0));
+                print_repo_search(&v);
             }
-            SearchAction::Users { query } => {
-                let v = api.search_users(&query)?;
-                print_list(&v, |it| {
-                    let login = it["login"].as_str().unwrap_or("?");
-                    let name = it["name"].as_str().unwrap_or("");
-                    if name.is_empty() {
-                        login.to_string()
-                    } else {
-                        format!("{} ({})", login, name)
-                    }
-                });
+            SearchAction::Users { query, native, max_pages } => {
+                let (mut v, pages, dups) =
+                    api.search_v5_all("/search/users", &query, 20, max_pages)?;
+                if native {
+                    output::filter_native_mirrors(&mut v);
+                }
+                eprintln!("[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果", v.as_array().map(|a| a.len()).unwrap_or(0));
+                print_user_search(&v);
             }
-            SearchAction::Issues { query } => {
-                let v = api.search_issues(&query)?;
-                print_list(&v, |it| {
-                    format!(
-                        "#{} [{}] {}",
-                        it["number"].as_u64().unwrap_or(0),
-                        it["state"].as_str().unwrap_or("?"),
-                        it["title"].as_str().unwrap_or("?")
-                    )
-                });
+            SearchAction::Issues { query, native, max_pages } => {
+                let (mut v, pages, dups) =
+                    api.search_v5_all("/search/issues", &query, 20, max_pages)?;
+                if native {
+                    output::filter_native_mirrors(&mut v);
+                }
+                eprintln!("[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果", v.as_array().map(|a| a.len()).unwrap_or(0));
+                print_issue_search(&v);
             }
             SearchAction::Web {
                 query,
                 r#type,
-                page,
                 per_page,
+                max_pages,
                 json,
             } => {
-                let raw = crate::api::web_search(&query, &r#type, page, per_page)?;
-                let d = crate::api::search_digest(&raw, &r#type);
+                // SQLite 缓存：同 query+type+per_page+max_pages 10 分钟内直接回放
+                let cached =
+                    gc_core::db::search_cache_get(&query, &r#type, per_page, max_pages, 600)
+                        .ok()
+                        .flatten();
+                let d = if let Some(d) = cached {
+                    eprintln!("[缓存] SQLite 命中（10 分钟内），未发网络请求");
+                    d
+                } else {
+                    let (d, pages, dups) =
+                        crate::api::web_search_all(&query, &r#type, per_page, max_pages)?;
+                    if let Err(e) =
+                        gc_core::db::search_cache_put(&query, &r#type, per_page, max_pages,
+                                                      pages, &d)
+                    {
+                        eprintln!("[缓存] 写入 SQLite 失败: {e}");
+                    }
+                    eprintln!(
+                        "[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果",
+                        d["count"].as_u64().unwrap_or(0)
+                    );
+                    d
+                };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&d)?);
                 } else {
@@ -2005,6 +2055,10 @@ pub fn run() -> Result<()> {
                 println!("已删除讨论: {}", id);
             }
         },
+
+        Command::WebLogin => {
+            crate::web_login::run_web_login(true)?;
+        }
 
         Command::Refresh => {
             let (access, refresh) = config::load_web_tokens()?;
@@ -2199,6 +2253,16 @@ pub fn run() -> Result<()> {
                 print_list(&v, |it| {
                     format!("{}", it["full_name"].as_str().unwrap_or("?"))
                 });
+            }
+            UserAction::Search { query, native, max_pages } => {
+                let (mut v, pages, dups) =
+                    api.search_v5_all("/search/users", &query, 20, max_pages)?;
+                if native {
+                    output::filter_native_mirrors(&mut v);
+                }
+                eprintln!("[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果",
+                          v.as_array().map(|a| a.len()).unwrap_or(0));
+                print_user_search(&v);
             }
             UserAction::Namespaces { mode } => {
                 let v = api.user_namespaces(&mode, 0, 0)?;
@@ -2477,6 +2541,44 @@ fn run_install(system: bool) -> Result<()> {
     Ok(())
 }
 /// 打印列表：兼容直接数组、{ "data": [...] } 与 { "issues": [...] } 三种返回结构
+/// `gc search repos` 与 `gc repo search` 共用的打印格式。
+pub fn print_repo_search(v: &Value) {
+    print_list(v, |it| {
+        let full = it["full_name"].as_str().unwrap_or("?");
+        let desc = it["description"].as_str().unwrap_or("");
+        if desc.is_empty() {
+            full.to_string()
+        } else {
+            format!("{} — {}", full, desc)
+        }
+    });
+}
+
+/// `gc search users` 与 `gc user search` 共用的打印格式。
+pub fn print_user_search(v: &Value) {
+    print_list(v, |it| {
+        let login = it["login"].as_str().unwrap_or("?");
+        let name = it["name"].as_str().unwrap_or("");
+        if name.is_empty() {
+            login.to_string()
+        } else {
+            format!("{} ({})", login, name)
+        }
+    });
+}
+
+/// `gc search issues` 与 `gc issue search` 共用的打印格式。
+pub fn print_issue_search(v: &Value) {
+    print_list(v, |it| {
+        format!(
+            "#{} [{}] {}",
+            it["number"].as_u64().unwrap_or(0),
+            it["state"].as_str().unwrap_or("?"),
+            it["title"].as_str().unwrap_or("?")
+        )
+    });
+}
+
 /// 打印 `gc search web` 的精简结果（输入是 api::search_digest 的输出）。
 fn print_web_search(d: &Value, kind: &str) {
     let items = d["items"].as_array().cloned().unwrap_or_default();
@@ -2523,12 +2625,23 @@ fn print_web_search(d: &Value, kind: &str) {
             }
         }
     }
-    println!(
-        "\n共 {} 条，第 {}/{} 页",
-        d["total"].as_u64().unwrap_or(0),
-        d["page"].as_u64().unwrap_or(1),
-        d["page_count"].as_u64().unwrap_or(0)
-    );
+    if let Some(pages) = d["pages_fetched"].as_u64() {
+        // 全页聚合模式：页脚如实报告抓取情况，不再显示误导性的「第 1/N 页」
+        println!(
+            "\n共 {} 条（已翻完全部 {} 页去重聚合，剔除重复 {} 条，唯一 {} 条）",
+            d["total"].as_u64().unwrap_or(0),
+            pages,
+            d["duplicates"].as_u64().unwrap_or(0),
+            d["count"].as_u64().unwrap_or(0)
+        );
+    } else {
+        println!(
+            "\n共 {} 条，第 {}/{} 页",
+            d["total"].as_u64().unwrap_or(0),
+            d["page"].as_u64().unwrap_or(1),
+            d["page_count"].as_u64().unwrap_or(0)
+        );
+    }
 }
 #[cfg(test)]
 mod tests {

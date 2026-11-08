@@ -11,6 +11,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod ctx;
+pub mod db;
 pub mod output;
 pub mod qr_login;
 pub mod siginfo;

@@ -392,6 +392,16 @@ pub enum RepoAction {
     },
     /// 显示 gc 在当前仓库使用哪个 git remote 解析 owner/name
     GetRemote,
+    /// 搜索仓库（等价 gc search repos；默认翻完全部页并去重聚合）
+    Search {
+        query: String,
+        /// 原生过滤：排除 AtomGit/GitCode 官方 GitHub 镜像组织
+        #[arg(long)]
+        native: bool,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
     /// 设置 gc 在当前仓库使用哪个 git remote（写入 git local config 的 gc.remote）
     SetRemote {
         /// remote 名称，例如 origin / upstream
@@ -1118,6 +1128,24 @@ pub fn run(action: RepoAction, api: &ApiClient) -> anyhow::Result<()> {
                 Some(r) => println!("{}  ->  {}", remote, r),
                 None => println!("{}（当前目录解析不出 gitcode 仓库）", remote),
             }
+        }
+        RepoAction::Search { query, native, max_pages } => {
+            let (mut v, pages, dups) =
+                api.search_v5_all("/search/repositories", &query, 20, max_pages)?;
+            if native {
+                gc_core::output::filter_native_mirrors(&mut v);
+            }
+            eprintln!("[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果",
+                      v.as_array().map(|a| a.len()).unwrap_or(0));
+            print_list(&v, |it| {
+                let full = it["full_name"].as_str().unwrap_or("?");
+                let desc = it["description"].as_str().unwrap_or("");
+                if desc.is_empty() {
+                    full.to_string()
+                } else {
+                    format!("{} — {}", full, desc)
+                }
+            });
         }
         RepoAction::SetRemote { remote } => {
             let status = std::process::Command::new("git")

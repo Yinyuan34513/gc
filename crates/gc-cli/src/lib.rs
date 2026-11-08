@@ -14,3 +14,4 @@ pub use gc_core::{api, auth, config, ctx, output};
 pub use gc_mcp::mcp;
 
 pub mod cli;
+pub mod web_login;

@@ -10,6 +10,66 @@ pub fn read_as_base64(path: &str) -> anyhow::Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+/// 原生搜索（--native）的镜像仓过滤：排除 AtomGit/GitCode 官方旗下 GitHub
+/// 镜像组织的条目（2026-11-08 实测探测的官方全集；带不带 S / 连字符变体都命中）。
+pub fn filter_native_mirrors(v: &mut Value) {
+    const MIRROR_ORGS: [&str; 7] = [
+        "gh_mirrors",      // GitHub 加速计划
+        "gh-mirrors",      // gh镜像（连字符变体）
+        "gh_mirror",       // 无 S 变体
+        "gh-mirror",       // 无 S + 连字符变体
+        "GitHub_Trending", // GitHub推荐项目精选
+        "mirrors_delta",   // delta 镜像（同款两字母子分组）
+        "github_mirror",
+    ];
+    fn is_mirror(v: &Value) -> bool {
+        let s = |k: &str| v[k].as_str().unwrap_or("");
+        // full_name / path_with_namespace 取第一段；repository.full_name 同理
+        let path = {
+            let p = s("full_name");
+            let p = if p.is_empty() { s("path_with_namespace") } else { p };
+            if p.is_empty() {
+                v["repository"]["full_name"].as_str().unwrap_or("")
+            } else {
+                p
+            }
+        };
+        let owner = if path.is_empty() {
+            // 用户条目直接看 login；否则回退从 html_url 解析 owner
+            let login = s("login");
+            if !login.is_empty() {
+                login
+            } else {
+                let url = s("html_url");
+                url.trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .nth(1)
+                    .unwrap_or("")
+            }
+        } else {
+            path.split('/').next().unwrap_or("")
+        };
+        MIRROR_ORGS.iter().any(|o| owner.eq_ignore_ascii_case(o))
+    }
+    // 响应可能是数组，或带 items/data/issues/events 键的对象
+    match v {
+        Value::Array(a) => a.retain(|it| !is_mirror(it)),
+        Value::Object(o) => {
+            for k in ["items", "data", "issues", "events"] {
+                match o.get_mut(k) {
+                    Some(Value::Array(a)) => {
+                        a.retain(|it| !is_mirror(it));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// 结构化输出助手：给了 --jq 则执行 jq 表达式，给了 --json 则打印完整 JSON。
 pub fn print_structured(v: &Value, json: bool, jq: &Option<String>) -> anyhow::Result<bool> {
     if let Some(f) = jq {
@@ -153,4 +213,54 @@ pub fn edit_text_external(initial: &str) -> anyhow::Result<String> {
     let text = std::fs::read_to_string(&path).map_err(|e| anyhow!("读回临时文件失败: {}", e))?;
     let _ = std::fs::remove_file(&path);
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn filter_native_mirrors_drops_exact_org_match() {
+        let mut v = json!({ "items": [
+            { "full_name": "gh_mirrors/vl/vlc", "description": "VLC" },
+            { "full_name": "gh_mirror/x/y", "description": "mirror2" },
+            { "full_name": "GitHub_Trending/gi/github-mcp-server", "description": "trending" },
+            { "full_name": "mirrors_delta/as/pytorch", "description": "delta" },
+            { "full_name": "gh-mirrors/co/ComfyUI", "description": "连字符变体" },
+            { "full_name": "someone/gh_mirrors", "description": "owner 不是镜像组织" },
+            { "full_name": "alice/hello", "description": "普通仓库" },
+            { "login": "gh_mirrors", "name": "mirror org" },
+            { "login": "bob", "name": "Bob" },
+        ]});
+        filter_native_mirrors(&mut v);
+        let items = v["items"].as_array().unwrap();
+        let names: Vec<&str> = items
+            .iter()
+            .map(|it| {
+                it["full_name"].as_str()
+                    .or_else(|| it["login"].as_str())
+                    .unwrap_or("?")
+            })
+            .collect();
+        // 官方镜像组织全集被精确排除；子串（someone/gh_mirrors）与普通条目保留。
+        assert_eq!(names, ["someone/gh_mirrors", "alice/hello", "bob"]);
+    }
+
+    #[test]
+    fn filter_native_mirrors_handles_arrays_and_other_keys() {
+        let mut a = json!([
+            { "path_with_namespace": "gh_mirrors/vl/vlc" },
+            { "path_with_namespace": "carol/repo" },
+        ]);
+        filter_native_mirrors(&mut a);
+        assert_eq!(a.as_array().unwrap().len(), 1);
+
+        let mut b = json!({ "data": [
+            { "html_url": "https://gitcode.com/gh_mirror/x/y" },
+            { "html_url": "https://gitcode.com/dave/z" },
+        ]});
+        filter_native_mirrors(&mut b);
+        assert_eq!(b["data"].as_array().unwrap().len(), 1);
+    }
 }

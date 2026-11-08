@@ -2121,6 +2121,55 @@ impl ApiClient {
         self.get("/search/repositories", &[("q", q)])
     }
 
+    /// v5 原生搜索全页聚合（/search/repositories|users|issues 共用裸数组形状）。
+    /// 翻页直到不足一页（服务端无 total，只能这样判底）或达到 max_pages 上限；
+    /// 跨页按条目 id 去重。返回 (合并后的条目数组, 抓取页数, 去重条数)。
+    pub fn search_v5_all(
+        &self,
+        path: &str,
+        q: &str,
+        per_page: u32,
+        max_pages: Option<u32>,
+    ) -> Result<(Value, u32, u64)> {
+        let mut merged: Vec<Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut duplicates: u64 = 0;
+        let mut fetched: u32 = 0;
+        let cap = max_pages.unwrap_or(u32::MAX);
+        let pp = per_page.clamp(1, 100).to_string();
+
+        let mut page = 1u32;
+        loop {
+            let pg = page.to_string();
+            let raw = self.get(path, &[("q", q), ("per_page", &pp), ("page", &pg)])?;
+            let items = match raw {
+                Value::Array(a) => a,
+                _ => break, // 形状不对（错误页等），停止翻页
+            };
+            if items.is_empty() {
+                break;
+            }
+            let page_len = items.len() as u32;
+            for it in items {
+                let key = match it["id"].as_u64() {
+                    Some(id) => format!("id:{id}"),
+                    None => serde_json::to_string(&it).unwrap_or_default(),
+                };
+                if seen.insert(key) {
+                    merged.push(it);
+                } else {
+                    duplicates += 1;
+                }
+            }
+            fetched += 1;
+            if page_len < per_page.clamp(1, 100) || fetched >= cap {
+                break; // 不足一页 = 到底了
+            }
+            page += 1;
+        }
+        Ok((Value::Array(merged), fetched, duplicates))
+    }
+
     pub fn search_users(&self, q: &str) -> Result<Value> {
         self.get("/search/users", &[("q", q)])
     }
@@ -2244,6 +2293,81 @@ pub fn search_digest(raw: &Value, kind: &str) -> Value {
         "count": items.len(),
         "items": items,
     })
+}
+
+/// 条目身份键：跨页去重用。优先服务端 id，回退到路径/用户名等业务键。
+fn search_item_key(c: &Value) -> String {
+    let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
+    if let Some(id) = c["id"].as_u64() {
+        return format!("id:{id}");
+    }
+    for k in ["path_with_namespace", "username", "url"] {
+        let v = s(k);
+        if !v.is_empty() {
+            return format!("{k}:{v}");
+        }
+    }
+    // issue 兜底：仓库 + iid / number / 标题
+    let iid = c["iid"].as_u64().or_else(|| c["number"].as_u64());
+    if let Some(n) = iid {
+        return format!("issue:{}:{n}", s("path_with_namespace"));
+    }
+    format!("raw:{}", serde_json::to_string(c).unwrap_or_default())
+}
+
+/// 全量搜索：从第 1 页翻到 page_count（可被 max_pages 截断），跨页去重后聚合。
+/// 返回 (聚合后的 digest, 实际抓取页数, 服务端报告的重复条目数)。
+pub fn web_search_all(
+    query: &str,
+    kind: &str,
+    per_page: u32,
+    max_pages: Option<u32>,
+) -> Result<(Value, u32, u64)> {
+    let mut merged: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut duplicates: u64 = 0;
+    let mut page_count_total: u64 = 0;
+    let mut total: u64 = 0;
+    let mut fetched: u32 = 0;
+
+    let cap = max_pages.unwrap_or(u32::MAX);
+    let mut page = 1u32;
+    loop {
+        let raw = web_search(query, kind, page, per_page)?;
+        if fetched == 0 {
+            total = raw["total"].as_u64().unwrap_or(0);
+            page_count_total = raw["page_count"].as_u64().unwrap_or(0);
+        }
+        let content = raw["content"].as_array().cloned().unwrap_or_default();
+        if content.is_empty() {
+            break; // 越界即止
+        }
+        for c in content {
+            let key = search_item_key(&c);
+            if seen.insert(key) {
+                merged.push(c);
+            } else {
+                duplicates += 1;
+            }
+        }
+        fetched += 1;
+        // 终止条件：翻满服务端页数 / 达到用户上限 / 达到 total（服务端偶发虚报页数）
+        let enough = (fetched as u64) >= page_count_total
+            && page_count_total > 0
+            || (merged.len() as u64) >= total && total > 0;
+        if enough || fetched >= cap {
+            break;
+        }
+        page += 1;
+    }
+
+    let agg = json!({ "content": merged, "total": total, "page_num": 1,
+                      "page_count": page_count_total });
+    let mut digest = search_digest(&agg, kind);
+    // 标记为聚合结果：页脚不再显示「第 1/N 页」（那样会误导成只翻了第一页）
+    digest["pages_fetched"] = serde_json::json!(fetched);
+    digest["duplicates"] = serde_json::json!(duplicates);
+    Ok((digest, fetched, duplicates))
 }
 
 fn digest_one(c: &Value, kind: &str) -> Value {

@@ -102,10 +102,37 @@ pub enum IssueAction {
         #[arg(long)]
         file: Option<String>,
     },
+    /// 搜索 Issue（等价 gc search issues；默认翻完全部页并去重聚合）
+    Search {
+        query: String,
+        /// 原生过滤：排除官方 GitHub 镜像组织的条目
+        #[arg(long)]
+        native: bool,
+        /// 最多翻到第几页（默认翻完全部页）
+        #[arg(long)]
+        max_pages: Option<u32>,
+    },
 }
 
 pub fn run(action: IssueAction, api: &ApiClient) -> anyhow::Result<()> {
     match action {
+        IssueAction::Search { query, native, max_pages } => {
+            let (mut v, pages, dups) =
+                api.search_v5_all("/search/issues", &query, 20, max_pages)?;
+            if native {
+                gc_core::output::filter_native_mirrors(&mut v);
+            }
+            eprintln!("[聚合] 翻了 {pages} 页，去重 {dups} 条，{} 条唯一结果",
+                      v.as_array().map(|a| a.len()).unwrap_or(0));
+            print_list(&v, |it| {
+                format!(
+                    "#{} [{}] {}",
+                    it["number"].as_u64().unwrap_or(0),
+                    it["state"].as_str().unwrap_or("?"),
+                    it["title"].as_str().unwrap_or("?")
+                )
+            });
+        }
         IssueAction::List {
             repo,
             repo_pos,
